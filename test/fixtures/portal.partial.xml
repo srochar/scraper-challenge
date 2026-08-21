@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<partial-response>
+  <changes>
+    <update id="formBuscador:panel"><![CDATA[<div id="formBuscador:panel"><div class="row">Expediente 1 | Materia civil <a href="https://example.com/doc1.pdf">PDF</a></div></div>]]></update>
+    <update id="javax.faces.ViewState"><![CDATA[999:888]]></update>
+  </changes>
+</partial-response>
