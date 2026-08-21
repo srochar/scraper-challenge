@@ -5,6 +5,7 @@ import { Logger } from "./logger";
 import { DocumentRecord, DownloadResult, FailedRecord, RetryConfig, RetryDependencies } from "./types";
 import { executeWithRetry, shouldRetryStatus } from "./retryPolicy";
 import { ensureDir, fileExists } from "./utils/fs";
+import { toSpanishErrorMessage } from "./utils/errorMessages";
 
 export interface PdfDownloadServiceOptions {
   outputDir: string;
@@ -27,13 +28,15 @@ export class PdfDownloadService {
         wait: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
         random: () => Math.random(),
       };
-    this.axios = axiosInstance ?? axios.create({ responseType: "arraybuffer" });
+    this.axios = axiosInstance ?? axios.create({
+      responseType: "arraybuffer",
+    });
     this.logger = logger;
   }
 
   async download(record: DocumentRecord): Promise<{ result: DownloadResult; failure?: FailedRecord }> {
     if (!record.pdfHref) {
-      this.logger?.warn("Missing PDF link for record", { recordId: record.id, title: record.title });
+      this.logger?.warn("Registro sin enlace PDF", { accion: "descarga", recordId: record.id });
       return {
         result: {
           status: "missing_pdf",
@@ -46,7 +49,7 @@ export class PdfDownloadService {
     await ensureDir(this.outputDir);
     const path = join(this.outputDir, buildPdfFileName(record));
     if (await fileExists(path)) {
-      this.logger?.info("PDF already exists, skipping download", { recordId: record.id, path });
+      this.logger?.info("PDF ya existe, se omite descarga", { accion: "descarga", recordId: record.id });
       return {
         result: {
           status: "downloaded",
@@ -77,10 +80,11 @@ export class PdfDownloadService {
 
     if (!outcome.success || !outcome.value) {
       const reason = normalizeReason(outcome.lastError);
-      this.logger?.error("PDF download failed after retries", {
+      this.logger?.error("Fallo la descarga PDF tras reintentos", {
+        accion: "descarga",
         recordId: record.id,
         attempts: outcome.attempts,
-        reason,
+        reason: toSpanishErrorMessage(reason),
       });
       const failure: FailedRecord = {
         id: record.id,
@@ -101,10 +105,11 @@ export class PdfDownloadService {
     }
 
     await writeFile(path, outcome.value);
-    this.logger?.info("PDF downloaded", {
+    this.logger?.info("PDF descargado", {
+      accion: "descarga",
       recordId: record.id,
       attempts: outcome.attempts,
-      path,
+      archivo: basename(path),
     });
     return {
       result: {

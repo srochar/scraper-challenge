@@ -101,4 +101,6 @@ export interface ScraperConfig {
   logFormat: "json" | "pretty";
   logFilePath?: string;
   downloadMode: "individual" | "bulk" | "both";
+  sessionKey: string;
+  maxConsecutiveDownloadFailures: number;
 }

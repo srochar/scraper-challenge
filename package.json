@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "scrape": "ts-node src/index.ts",
+    "scrape:fresh": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"if (Test-Path -LiteralPath 'runs') { Remove-Item -LiteralPath 'runs' -Recurse -Force }; if (Test-Path -LiteralPath 'output') { Remove-Item -LiteralPath 'output' -Recurse -Force }; New-Item -ItemType Directory -Path 'runs' | Out-Null; New-Item -ItemType Directory -Path 'output' | Out-Null; npm run scrape -- --config scraper.config.json\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"

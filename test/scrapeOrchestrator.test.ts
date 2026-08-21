@@ -30,6 +30,8 @@ function createConfig(temp: string, overrides: Partial<ScraperConfig> = {}): Scr
     logFormat: "json",
     logFilePath: join(temp, "logs.jsonl"),
     downloadMode: "individual",
+    sessionKey: "civil:test-session",
+    maxConsecutiveDownloadFailures: 0,
     ...overrides,
   };
 }
@@ -272,5 +274,134 @@ describe("scrape orchestrator", () => {
     expect(bulkCalls).toBe(1);
     const bulkFiles = readdirSync(join(temp, "bulk")).filter((name) => name.endsWith(".zip"));
     expect(bulkFiles.length).toBe(1);
+  });
+
+  it("recovers session and retries search on ViewExpiredException", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><div class="row">Doc A | Civil <a href="https://example.com/a.pdf">PDF</a></div></div>';
+
+    let searchCalls = 0;
+    let submitCalls = 0;
+    const fakePortal = {
+      submitSearchFromInicio: async () => {
+        submitCalls += 1;
+        return { raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false };
+      },
+      search: async () => {
+        searchCalls += 1;
+        if (searchCalls === 1) {
+          throw new Error("JSF partial error: class javax.faces.application.ViewExpiredException viewId:/page/resultado.xhtml - View /page/resultado.xhtml could not be restored.");
+        }
+        return {
+          raw: "",
+          state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+          isPartial: true,
+          updates: { "formBuscador:panel": panel },
+        };
+      },
+    } as unknown as PortalClient;
+
+    const fakeDownloader = {
+      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, pdfPath: "x.pdf" } }),
+    } as unknown as PdfDownloadService;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-recover-"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, { maxPages: 1 });
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(summary.processed).toBe(1);
+    expect(summary.downloaded).toBe(1);
+    expect(searchCalls).toBe(2);
+    expect(submitCalls).toBe(2);
+  });
+
+  it("aborts run when consecutive download failures threshold is reached", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><div class="row">Doc A | Civil <a href="https://example.com/a.pdf">PDF</a></div><div class="row">Doc B | Civil <a href="https://example.com/b.pdf">PDF</a></div><div class="row">Doc C | Civil <a href="https://example.com/c.pdf">PDF</a></div></div>';
+
+    const fakePortal = {
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      search: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": panel },
+      }),
+    } as unknown as PortalClient;
+
+    const fakeDownloader = {
+      download: async (record: { id: string; pdfHref?: string }) => ({
+        result: { status: "failed" as const, attempts: 5, reason: "http_429" },
+        failure: {
+          id: record.id,
+          reason: "http_429",
+          attempts: 5,
+          pdfUrl: record.pdfHref,
+          timestamp: new Date().toISOString(),
+        },
+      }),
+    } as unknown as PdfDownloadService;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-threshold-"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, { maxConsecutiveDownloadFailures: 2 });
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
+
+    await expect(orchestrator.run()).rejects.toThrow(/fallas consecutivas de descarga/);
+  });
+
+  it("retries init on transient 500 and continues", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><div class="row">Doc A | Civil <a href="https://example.com/a.pdf">PDF</a></div></div>';
+
+    let initCalls = 0;
+    const fakePortal = {
+      submitSearchFromInicio: async () => {
+        initCalls += 1;
+        if (initCalls === 1) {
+          const err = new Error("Request failed with status code 500") as Error & {
+            response?: { status: number };
+          };
+          err.response = { status: 500 };
+          throw err;
+        }
+        return {
+          raw: `<html><body>${panel}<div id="formBuscador:data1ds"></div></body></html>`,
+          state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} },
+          isPartial: false,
+        };
+      },
+      search: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": panel },
+      }),
+      gotoPage: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "3:3", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": "<div id=\"formBuscador:panel\"></div>" },
+      }),
+    } as unknown as PortalClient;
+
+    const fakeDownloader = {
+      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, pdfPath: "x.pdf" } }),
+    } as unknown as PdfDownloadService;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-init-retry-"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, { maxPages: 1 });
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(initCalls).toBe(2);
+    expect(summary.processed).toBe(1);
+    expect(summary.downloaded).toBe(1);
   });
 });

@@ -1,5 +1,6 @@
-import { join } from "path";
+import { basename, join } from "path";
 import { writeFile } from "fs/promises";
+import * as cheerio from "cheerio";
 import { DocumentRecord, FailedRecord, RunErrorEvent, ScrapeSummary, ScraperConfig, RunStage } from "./types";
 import { PortalClient } from "./portalClient";
 import { parseDocumentsFromPanelHtml } from "./resultParser";
@@ -7,7 +8,9 @@ import { PdfDownloadService } from "./pdfDownloadService";
 import { resolvePdfUrl } from "./pdfResolver";
 import { RunStore } from "./runStore";
 import { Logger } from "./logger";
+import { NetworkDispatcher } from "./networkDispatcher";
 import { appendJsonLine, ensureDir } from "./utils/fs";
+import { toSpanishErrorMessage } from "./utils/errorMessages";
 
 export class ScrapeOrchestrator {
   constructor(
@@ -16,6 +19,7 @@ export class ScrapeOrchestrator {
     private readonly runStore: RunStore,
     private readonly config: ScraperConfig,
     private readonly logger?: Logger,
+    private readonly dispatcher?: NetworkDispatcher,
   ) {}
 
   async run(): Promise<ScrapeSummary> {
@@ -23,6 +27,7 @@ export class ScrapeOrchestrator {
     await ensureDir(this.config.outputDir);
     await ensureDir(this.config.bulkOutputDir);
     this.logger?.info("Run initialized", {
+      accion: "inicializar",
       outputDir: this.config.outputDir,
       dataDir: this.config.dataDir,
       runId: this.config.runId,
@@ -38,6 +43,7 @@ export class ScrapeOrchestrator {
     let missingPdf = 0;
     let failed = 0;
     let bulkZipDownloaded = 0;
+    let consecutiveDownloadFailures = 0;
 
     if (this.config.failedOnly) {
       const failures = await this.runStore.readFailures();
@@ -77,28 +83,48 @@ export class ScrapeOrchestrator {
       return { processed, downloaded, missingPdf, failed, bulkZipDownloaded };
     }
 
-    await this.safePortal(
+    const initResult = await this.safePortalInitWithRetry(
       "init",
       "submitSearchFromInicio",
       async () => this.portalClient.submitSearchFromInicio(this.config.searchTerm),
     );
-    const firstPage = await this.safePortal("search", "search", async () => this.portalClient.search(this.config.searchTerm));
     const records: DocumentRecord[] = [];
 
     const maxPages = this.config.maxPages && this.config.maxPages > 0 ? this.config.maxPages : 1;
-    const page1Records = extractRecordsFromResponse(firstPage, 1);
-    this.logger?.info("Page processed", { page: 1, records: page1Records.length });
+    let page1Records = extractRecordsFromHtml(initResult.raw, 1);
+    let usedFallbackSearch = false;
+    let shouldAttemptPagination = maxPages > 1 && hasPaginatorInHtml(initResult.raw);
+
+    if (page1Records.length === 0) {
+      usedFallbackSearch = true;
+      const firstPage = await this.safePortalWithSessionRecovery(
+        "search",
+        "search",
+        async () => this.portalClient.search(this.config.searchTerm),
+      );
+      page1Records = extractRecordsFromResponse(firstPage, 1);
+      shouldAttemptPagination = maxPages > 1 && (page1Records.length >= 10 || usedFallbackSearch);
+    }
+
+    this.logger?.info("Pagina procesada", { accion: "procesar_pagina", page: 1, records: page1Records.length });
     records.push(...page1Records);
 
-    for (let page = 2; page <= maxPages; page += 1) {
-      const pageResponse = await this.safePortal(
+    if (!shouldAttemptPagination) {
+      this.logger?.info("Skipping pagination due to missing paginator or low page-1 volume", {
+        page1Records: page1Records.length,
+        maxPages,
+      });
+    }
+
+    for (let page = 2; shouldAttemptPagination && page <= maxPages; page += 1) {
+      const pageResponse = await this.safePortalWithSessionRecovery(
         "paginate",
         "gotoPage",
         async () => this.portalClient.gotoPage(page, this.config.searchTerm),
         { page },
       );
       const pageRecords = extractRecordsFromResponse(pageResponse, page);
-      this.logger?.info("Page processed", { page, records: pageRecords.length });
+      this.logger?.info("Pagina procesada", { accion: "procesar_pagina", page, records: pageRecords.length });
       if (pageRecords.length === 0) {
         this.logger?.info("Stopping pagination due to empty page", { page });
         break;
@@ -109,7 +135,8 @@ export class ScrapeOrchestrator {
     const resumeState = this.config.resume ? await this.runStore.readProgress() : undefined;
     const alreadyProcessed = new Set(resumeState?.processedIds ?? []);
     const selected = applyBounds(records, this.config.maxRecords, alreadyProcessed);
-    this.logger?.info("Records selected for processing", {
+    this.logger?.info("Registros seleccionados", {
+      accion: "seleccionar_registros",
       discovered: records.length,
       selected: selected.length,
       skippedByResume: alreadyProcessed.size,
@@ -145,10 +172,13 @@ export class ScrapeOrchestrator {
         const download = await this.safeDownload(normalized, "download.record");
         if (download.result.status === "downloaded") {
           downloaded += 1;
+          consecutiveDownloadFailures = 0;
         } else if (download.result.status === "missing_pdf") {
           missingPdf += 1;
+          consecutiveDownloadFailures = 0;
         } else {
           failed += 1;
+          consecutiveDownloadFailures += 1;
           if (download.failure) {
             await this.runStore.appendFailure(download.failure);
             await this.runStore.appendError({
@@ -168,6 +198,7 @@ export class ScrapeOrchestrator {
               },
             });
           }
+          this.assertFailureThreshold(consecutiveDownloadFailures);
         }
       }
       processed += 1;
@@ -207,14 +238,36 @@ export class ScrapeOrchestrator {
             throw error;
           }
           bulkZipDownloaded = 1;
-          this.logger?.info("Bulk ZIP downloaded", { zipPath, selectedCount: selectedWithBulk.length });
+          this.logger?.info("ZIP masivo descargado", {
+            accion: "descarga_zip",
+            archivo: basename(zipPath),
+            selectedCount: selectedWithBulk.length,
+          });
         }
       }
     }
 
-    this.logger?.info("Run summary", { processed, downloaded, missingPdf, failed });
+    this.logger?.info("Resumen de corrida", {
+      accion: "resumen",
+      processed,
+      downloaded,
+      missingPdf,
+      failed,
+    });
 
     return { processed, downloaded, missingPdf, failed, bulkZipDownloaded };
+  }
+
+  private assertFailureThreshold(consecutiveDownloadFailures: number): void {
+    if (this.config.maxConsecutiveDownloadFailures <= 0) {
+      return;
+    }
+    if (consecutiveDownloadFailures < this.config.maxConsecutiveDownloadFailures) {
+      return;
+    }
+    throw new Error(
+      `Se detuvo la corrida tras ${consecutiveDownloadFailures} fallas consecutivas de descarga (umbral=${this.config.maxConsecutiveDownloadFailures}).`,
+    );
   }
 
   private async pace(operation: string, context?: Record<string, unknown>): Promise<void> {
@@ -236,16 +289,95 @@ export class ScrapeOrchestrator {
     context?: Record<string, unknown>,
   ): Promise<T> {
     try {
-      return await fn();
+      return await this.executeNetwork(operation, fn);
     } catch (error) {
       await this.recordError(stage, operation, error, context);
       throw error;
     }
   }
 
+  private async safePortalInitWithRetry<T>(
+    stage: RunStage,
+    operation: string,
+    fn: () => Promise<T>,
+    context?: Record<string, unknown>,
+  ): Promise<T> {
+    const maxInitRetries = 2;
+
+    for (let attempt = 0; attempt <= maxInitRetries; attempt += 1) {
+      try {
+        return await this.executeNetwork(operation, fn);
+      } catch (error) {
+        const retryable = isRetryableInitError(error);
+        const exhausted = attempt >= maxInitRetries;
+        if (!retryable || exhausted) {
+          await this.recordError(stage, operation, error, context);
+          throw error;
+        }
+
+        const backoffMs = 600 * (attempt + 1);
+        this.logger?.warn("Reintentando inicio por error transitorio", {
+          accion: "reintento_init",
+          stage,
+          operation,
+          initRetryAttempt: attempt + 1,
+          maxInitRetries,
+          backoffMs,
+          statusCode: getErrorStatus(error),
+          errorMessage: toSpanishErrorMessage(error),
+          ...(context ?? {}),
+        });
+        await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+      }
+    }
+
+    throw new Error(`Unexpected init retry flow termination for ${operation}`);
+  }
+
+  private async safePortalWithSessionRecovery<T>(
+    stage: RunStage,
+    operation: string,
+    fn: () => Promise<T>,
+    context?: Record<string, unknown>,
+  ): Promise<T> {
+    const maxRecoveryAttempts = 2;
+
+    for (let attempt = 0; attempt <= maxRecoveryAttempts; attempt += 1) {
+      try {
+        return await this.executeNetwork(operation, fn);
+      } catch (error) {
+        const shouldRecover = isViewExpiredError(error);
+        const exhausted = attempt >= maxRecoveryAttempts;
+        if (!shouldRecover || exhausted) {
+          await this.recordError(stage, operation, error, context);
+          throw error;
+        }
+
+        this.logger?.warn("Recuperando sesion tras expiracion", {
+          accion: "recuperar_sesion",
+          stage,
+          operation,
+          recoveryAttempt: attempt + 1,
+          maxRecoveryAttempts,
+          ...(context ?? {}),
+        });
+
+        await this.executeNetwork("recover.submitSearchFromInicio", async () =>
+          this.portalClient.submitSearchFromInicio(this.config.searchTerm),
+        );
+
+        if (operation !== "search") {
+          await this.executeNetwork("recover.search", async () => this.portalClient.search(this.config.searchTerm));
+        }
+      }
+    }
+
+    throw new Error(`Unexpected recovery flow termination for ${operation}`);
+  }
+
   private async safeDownload(record: DocumentRecord, operation: string): Promise<{ result: { status: "downloaded" | "missing_pdf" | "failed"; attempts: number; pdfPath?: string; reason?: string }; failure?: FailedRecord }> {
     try {
-      return await this.downloader.download(record);
+      return await this.executeNetwork(operation, async () => this.downloader.download(record));
     } catch (error) {
       await this.recordError("download", operation, error, {
         recordId: record.id,
@@ -273,7 +405,7 @@ export class ScrapeOrchestrator {
       stage,
       operation,
       errorName: error instanceof Error ? error.name : "Error",
-      errorMessage: error instanceof Error ? error.message : String(error),
+      errorMessage: toSpanishErrorMessage(error),
       stack: error instanceof Error ? error.stack : undefined,
       recordId,
       page,
@@ -282,13 +414,21 @@ export class ScrapeOrchestrator {
       context,
     };
     await this.runStore.appendError(event);
-    this.logger?.error("Stage failure captured", {
+    this.logger?.error("Falla de etapa", {
+      accion: "error",
       stage,
       operation,
       errorName: event.errorName,
       errorMessage: event.errorMessage,
       ...(context ?? {}),
     });
+  }
+
+  private async executeNetwork<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+    if (!this.dispatcher) {
+      return fn();
+    }
+    return this.dispatcher.run(this.config.sessionKey, operation, fn);
   }
 }
 
@@ -297,6 +437,12 @@ function getErrorStatus(error: unknown): number | undefined {
     const status = (error as { status?: unknown }).status;
     if (typeof status === "number") {
       return status;
+    }
+  }
+  if (typeof error === "object" && error && "response" in error) {
+    const response = (error as { response?: { status?: unknown } }).response;
+    if (typeof response?.status === "number") {
+      return response.status;
     }
   }
   return undefined;
@@ -326,4 +472,47 @@ function extractRecordsFromResponse(response: { updates?: Record<string, string>
     return [];
   }
   return parseDocumentsFromPanelHtml(panel, page);
+}
+
+function extractRecordsFromHtml(html: string, page: number): DocumentRecord[] {
+  if (!html.trim()) {
+    return [];
+  }
+
+  const $ = cheerio.load(html);
+  const panel = $("#formBuscador\\:panel").first();
+  if (panel.length === 0) {
+    return [];
+  }
+
+  return parseDocumentsFromPanelHtml($.html(panel), page);
+}
+
+function hasPaginatorInHtml(html: string): boolean {
+  if (!html.trim()) {
+    return false;
+  }
+
+  const $ = cheerio.load(html);
+  return $("#formBuscador\\:data1ds, [id*='data1ds'], .rf-ds, .rich-datascr").length > 0;
+}
+
+function isViewExpiredError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.message.includes("ViewExpiredException");
+}
+
+function isRetryableInitError(error: unknown): boolean {
+  if (isViewExpiredError(error)) {
+    return true;
+  }
+
+  const status = getErrorStatus(error);
+  if (typeof status !== "number") {
+    return false;
+  }
+
+  return status === 408 || status === 429 || status >= 500;
 }

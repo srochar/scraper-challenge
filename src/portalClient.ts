@@ -118,6 +118,7 @@ export class PortalClient {
       bulkSubmitField,
     };
     this.logger?.info("Search response received", {
+      accion: "buscar",
       updateCount: Object.keys(updates).length,
       hasPanel: Boolean(updates["formBuscador:panel"]),
     });
@@ -177,6 +178,7 @@ export class PortalClient {
     const resultState = extractPortalState(resultPage.data);
     this.state = resultState;
     this.logger?.info("Search form submitted and result page loaded", {
+      accion: "buscar",
       viewStateLength: resultState.viewState.length,
       defaults: Object.keys(resultState.formDefaults).length,
     });
@@ -216,6 +218,7 @@ export class PortalClient {
       bulkSubmitField,
     };
     this.logger?.info("Pagination response received", {
+      accion: "paginar",
       page,
       updateCount: Object.keys(updates).length,
       hasPanel: Boolean(updates["formBuscador:panel"]),

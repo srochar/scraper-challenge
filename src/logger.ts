@@ -15,6 +15,7 @@ export interface LoggerOptions {
   service: string;
   format?: "json" | "pretty";
   logFilePath?: string;
+  additionalLogFilePaths?: string[];
   context?: Record<string, unknown>;
 }
 
@@ -76,8 +77,14 @@ class StructuredLogger implements Logger {
       process.stdout.write(`${consoleLine}\n`);
     }
 
-    if (this.options.logFilePath) {
-      void appendFile(this.options.logFilePath, `${line}\n`, "utf8");
+    const fileTargets = [
+      this.options.logFilePath,
+      ...(this.options.additionalLogFilePaths ?? []),
+    ].filter((value): value is string => Boolean(value));
+
+    const uniqueTargets = Array.from(new Set(fileTargets));
+    for (const target of uniqueTargets) {
+      void appendFile(target, `${line}\n`, "utf8");
     }
   }
 }
@@ -100,14 +107,19 @@ function renderPretty(payload: Record<string, unknown>): string {
   const level = String(payload.level ?? "info") as LogLevel;
   const ts = String(payload.ts ?? "");
   const service = String(payload.service ?? "service");
-  const message = String(payload.message ?? "");
-  const context = Object.entries(payload).filter(([key]) => !["ts", "level", "service", "message"].includes(key));
-  const contextText = context
-    .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
-    .join(" ");
+  const action = String(payload.accion ?? payload.message ?? "");
+  const bot = payload.bot !== undefined ? String(payload.bot) : "";
+  const busqueda = payload.busqueda !== undefined ? String(payload.busqueda) : "";
+  const errorMessage = payload.errorMessage !== undefined ? String(payload.errorMessage) : "";
   const color = levelColor[level] ?? "";
   const levelText = `${color}${level.toUpperCase()}${reset}`;
-  return `${dim}${ts}${reset} ${levelText} ${service}: ${message}${contextText ? ` ${dim}${contextText}${reset}` : ""}`;
+  const core = [
+    bot ? `bot=${bot}` : "",
+    action ? `accion=${action}` : "",
+    busqueda ? `busqueda=${busqueda}` : "",
+  ].filter(Boolean).join(" ");
+  const tail = errorMessage ? ` ${dim}error=${errorMessage}${reset}` : "";
+  return `${dim}${ts}${reset} ${levelText} ${service}: ${core}${tail}`.trim();
 }
 
 export function normalizeLogLevel(value: string | undefined): LogLevel {
