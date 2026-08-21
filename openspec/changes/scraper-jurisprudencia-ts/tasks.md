@@ -12,7 +12,7 @@
 
 ## 3. Result Traversal and Metadata Extraction
 
-- [ ] 3.1 Implement result traversal orchestration for paginated/discoverable records and verify with fixtures that traversal stops only when no next page is available
+- [x] 3.1 Implement result traversal orchestration for paginated/discoverable records and verify with fixtures that traversal stops only when no next page is available
 - [x] 3.2 Implement metadata extraction into a structured record model and verify unit tests cover required and optional fields from representative samples
 - [x] 3.3 Implement deterministic record identity and output serialization (for resume/use downstream) and verify repeated runs over same fixtures produce stable identifiers
 
@@ -33,4 +33,4 @@
 
 - [x] 6.1 Build a unit test suite covering JSF state handling, parser behavior, retry/backoff, and continuation semantics, and verify `npm test` passes consistently
 - [x] 6.2 Add README usage documentation for full run, resume run, and failed-only retry workflows and verify commands are copy/paste executable
-- [ ] 6.3 Execute a bounded live run against the target portal (or optional alternative when needed) and verify produced artifacts include structured metadata output, downloaded PDFs, and failure/progress logs
+- [x] 6.3 Execute a bounded live run against the target portal (or optional alternative when needed) and verify produced artifacts include structured metadata output, downloaded PDFs, and failure/progress logs

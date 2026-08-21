@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<partial-response>
+  <changes>
+    <update id="formBuscador:panel"><![CDATA[<div id="formBuscador:panel"></div>]]></update>
+    <update id="javax.faces.ViewState"><![CDATA[333:222]]></update>
+  </changes>
+</partial-response>

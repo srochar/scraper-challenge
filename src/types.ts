@@ -1,6 +1,8 @@
 export interface PortalState {
   formId: string;
   viewState: string;
+  formDefaults: Record<string, string>;
+  bulkSubmitField?: string;
 }
 
 export interface PartialUpdateMap {
@@ -12,6 +14,7 @@ export interface DocumentRecord {
   title: string;
   metadata: Record<string, string>;
   pdfHref?: string;
+  bulkFieldName?: string;
   sourcePage: number;
 }
 
@@ -52,4 +55,7 @@ export interface ScraperConfig {
   failedOnly: boolean;
   maxRecords?: number;
   maxPages?: number;
+  logLevel: "debug" | "info" | "warn" | "error";
+  logFilePath?: string;
+  downloadMode: "individual" | "bulk" | "both";
 }

@@ -1,4 +1,4 @@
-import { mkdtempSync } from "fs";
+import { mkdtempSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
@@ -7,9 +7,10 @@ import { PdfDownloadService } from "../src/pdfDownloadService";
 import { RunStore } from "../src/runStore";
 import { ScrapeOrchestrator } from "../src/scrapeOrchestrator";
 import { ScraperConfig } from "../src/types";
-import { readFileSync } from "fs";
 import { parseDocumentsFromPanelHtml } from "../src/resultParser";
 import { readJsonLines } from "../src/utils/fs";
+
+const fixturesDir = join(__dirname, "fixtures");
 
 describe("scrape orchestrator", () => {
   it("continues processing when one document fails", async () => {
@@ -17,10 +18,11 @@ describe("scrape orchestrator", () => {
       '<div id="formBuscador:panel"><div class="row">Doc A | Civil <a href="https://example.com/a.pdf">PDF</a></div><div class="row">Doc B | Penal <a href="https://example.com/b.pdf">PDF</a></div></div>';
 
     const fakePortal = {
-      initialize: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1" }, isPartial: false }),
+      initialize: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
       search: async () => ({
         raw: "",
-        state: { formId: "formBuscador", viewState: "2:2" },
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
         isPartial: true,
         updates: { "formBuscador:panel": panel },
       }),
@@ -57,6 +59,8 @@ describe("scrape orchestrator", () => {
       dataDir: join(temp, "data"),
       resume: false,
       failedOnly: false,
+      logLevel: "info",
+      downloadMode: "individual",
     };
 
     const orchestrator = new ScrapeOrchestrator(fakePortal, downloader, runStore, config);
@@ -76,10 +80,11 @@ describe("scrape orchestrator", () => {
       '<div id="formBuscador:panel"><div class="row">Doc A | Civil <a href="https://example.com/a.pdf">PDF</a></div><div class="row">Doc B | Penal <a href="https://example.com/b.pdf">PDF</a></div></div>';
 
     const fakePortal = {
-      initialize: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1" }, isPartial: false }),
+      initialize: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
       search: async () => ({
         raw: "",
-        state: { formId: "formBuscador", viewState: "2:2" },
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
         isPartial: true,
         updates: { "formBuscador:panel": panel },
       }),
@@ -117,6 +122,8 @@ describe("scrape orchestrator", () => {
       dataDir: join(temp, "data"),
       resume: true,
       failedOnly: false,
+      logLevel: "info",
+      downloadMode: "individual",
     };
 
     const orchestrator = new ScrapeOrchestrator(fakePortal, downloader, runStore, config);
@@ -129,8 +136,9 @@ describe("scrape orchestrator", () => {
 
   it("processes only failed records in failed-only mode", async () => {
     const fakePortal = {
-      initialize: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1" }, isPartial: false }),
-      search: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "2:2" }, isPartial: true, updates: {} }),
+      initialize: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      search: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} }, isPartial: true, updates: {} }),
     } as unknown as PortalClient;
 
     const temp = mkdtempSync(join(tmpdir(), "scraper-orch-failed-only-"));
@@ -159,6 +167,8 @@ describe("scrape orchestrator", () => {
       dataDir: join(temp, "data"),
       resume: false,
       failedOnly: true,
+      logLevel: "info",
+      downloadMode: "individual",
     };
 
     const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
@@ -167,5 +177,112 @@ describe("scrape orchestrator", () => {
     expect(summary.processed).toBe(1);
     expect(summary.downloaded).toBe(1);
     expect(calls).toBe(1);
+  });
+
+  it("traverses additional page until empty page is reached", async () => {
+    const page1Xml = readFileSync(join(fixturesDir, "portal.partial.xml"), "utf8");
+    const page2Xml = readFileSync(join(fixturesDir, "portal.pagination.partial.xml"), "utf8");
+    const emptyXml = readFileSync(join(fixturesDir, "portal.page.empty.partial.xml"), "utf8");
+
+    const fakePortal = {
+      initialize: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} },
+        isPartial: false,
+      }),
+      submitSearchFromInicio: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} },
+        isPartial: false,
+      }),
+      search: async () => ({
+        raw: page1Xml,
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": '<div id="formBuscador:panel"><div class="row">Expediente 1 | Materia civil <a href="/jurisprudenciaweb/ServletDescarga?uuid=c67a9b8b-0f70-413c-919a-598091c08781">PDF</a></div></div>' },
+      }),
+      gotoPage: async (page: number) => {
+        if (page === 2) {
+          return {
+            raw: page2Xml,
+            state: { formId: "formBuscador", viewState: "3:3", formDefaults: {} },
+            isPartial: true,
+            updates: { "formBuscador:panel": '<div id="formBuscador:panel"><div class="row">Expediente P2 | Penal <a href="/jurisprudenciaweb/ServletDescarga?uuid=11111111-1111-1111-1111-111111111111">PDF</a></div></div>' },
+          };
+        }
+        return {
+          raw: emptyXml,
+          state: { formId: "formBuscador", viewState: "4:4", formDefaults: {} },
+          isPartial: true,
+          updates: { "formBuscador:panel": '<div id="formBuscador:panel"></div>' },
+        };
+      },
+    } as unknown as PortalClient;
+
+    const fakeDownloader = {
+      download: async () => ({ result: { status: "downloaded", attempts: 1, pdfPath: "x.pdf" } }),
+    } as unknown as PdfDownloadService;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-pages-"));
+    const runStore = new RunStore(join(temp, "data"));
+    const config: ScraperConfig = {
+      baseUrl: "https://jurisprudencia.pj.gob.pe",
+      searchTerm: "Mineria",
+      outputDir: join(temp, "pdfs"),
+      dataDir: join(temp, "data"),
+      resume: false,
+      failedOnly: false,
+      maxPages: 3,
+      logLevel: "info",
+      downloadMode: "individual",
+    };
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(summary.processed).toBe(2);
+    expect(summary.downloaded).toBe(2);
+  });
+
+  it("downloads bulk zip when mode is bulk", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><table><tbody><tr><td>1</td><td>Doc A</td><td>Civil</td><td><a href="/jurisprudenciaweb/ServletDescarga?uuid=abc">PDF</a><input type="checkbox" name="formBuscador:repeat:0:j_idt457" /></td></tr></tbody></table></div>';
+
+    let bulkCalls = 0;
+    const fakePortal = {
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" }, isPartial: false }),
+      search: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "2:2", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" }, isPartial: true, updates: { "formBuscador:panel": panel } }),
+      gotoPage: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "3:3", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" }, isPartial: true, updates: { "formBuscador:panel": '<div id="formBuscador:panel"></div>' } }),
+      downloadBulkZip: async () => {
+        bulkCalls += 1;
+        return Buffer.from("PK\u0003\u0004test");
+      },
+    } as unknown as PortalClient;
+
+    const fakeDownloader = {
+      download: async () => ({ result: { status: "downloaded", attempts: 1, pdfPath: "x.pdf" } }),
+    } as unknown as PdfDownloadService;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-bulk-"));
+    const runStore = new RunStore(join(temp, "data"));
+    const config: ScraperConfig = {
+      baseUrl: "https://jurisprudencia.pj.gob.pe",
+      searchTerm: "civil",
+      outputDir: join(temp, "pdfs"),
+      dataDir: join(temp, "data"),
+      resume: false,
+      failedOnly: false,
+      maxPages: 1,
+      logLevel: "info",
+      downloadMode: "bulk",
+    };
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(summary.processed).toBe(1);
+    expect(summary.downloaded).toBe(0);
+    expect(summary.bulkZipDownloaded).toBe(1);
+    expect(bulkCalls).toBe(1);
   });
 });

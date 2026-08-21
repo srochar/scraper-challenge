@@ -1,6 +1,7 @@
 import { basename, extname, join } from "path";
 import { writeFile } from "fs/promises";
 import axios, { AxiosInstance } from "axios";
+import { Logger } from "./logger";
 import { DocumentRecord, DownloadResult, FailedRecord, RetryConfig, RetryDependencies } from "./types";
 import { executeWithRetry, shouldRetryStatus } from "./retryPolicy";
 import { ensureDir, fileExists } from "./utils/fs";
@@ -16,8 +17,9 @@ export class PdfDownloadService {
   private readonly outputDir: string;
   private readonly retryConfig: RetryConfig;
   private readonly retryDeps: RetryDependencies;
+  private readonly logger?: Logger;
 
-  constructor(options: PdfDownloadServiceOptions, axiosInstance?: AxiosInstance) {
+  constructor(options: PdfDownloadServiceOptions, axiosInstance?: AxiosInstance, logger?: Logger) {
     this.outputDir = options.outputDir;
     this.retryConfig = options.retryConfig;
     this.retryDeps =
@@ -26,10 +28,12 @@ export class PdfDownloadService {
         random: () => Math.random(),
       };
     this.axios = axiosInstance ?? axios.create({ responseType: "arraybuffer" });
+    this.logger = logger;
   }
 
   async download(record: DocumentRecord): Promise<{ result: DownloadResult; failure?: FailedRecord }> {
     if (!record.pdfHref) {
+      this.logger?.warn("Missing PDF link for record", { recordId: record.id, title: record.title });
       return {
         result: {
           status: "missing_pdf",
@@ -42,6 +46,7 @@ export class PdfDownloadService {
     await ensureDir(this.outputDir);
     const path = join(this.outputDir, buildPdfFileName(record));
     if (await fileExists(path)) {
+      this.logger?.info("PDF already exists, skipping download", { recordId: record.id, path });
       return {
         result: {
           status: "downloaded",
@@ -53,6 +58,7 @@ export class PdfDownloadService {
 
     const outcome = await executeWithRetry(
       async () => {
+        this.logger?.debug("Downloading PDF", { recordId: record.id, url: record.pdfHref });
         const response = await this.axios.get<ArrayBuffer>(record.pdfHref as string, { responseType: "arraybuffer" });
         if (response.status >= 400) {
           const err = new Error(`HTTP_${response.status}`);
@@ -71,6 +77,11 @@ export class PdfDownloadService {
 
     if (!outcome.success || !outcome.value) {
       const reason = normalizeReason(outcome.lastError);
+      this.logger?.error("PDF download failed after retries", {
+        recordId: record.id,
+        attempts: outcome.attempts,
+        reason,
+      });
       const failure: FailedRecord = {
         id: record.id,
         reason,
@@ -90,6 +101,11 @@ export class PdfDownloadService {
     }
 
     await writeFile(path, outcome.value);
+    this.logger?.info("PDF downloaded", {
+      recordId: record.id,
+      attempts: outcome.attempts,
+      path,
+    });
     return {
       result: {
         status: "downloaded",
@@ -98,6 +114,7 @@ export class PdfDownloadService {
       },
     };
   }
+
 }
 
 export function buildPdfFileName(record: DocumentRecord): string {
