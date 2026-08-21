@@ -21,6 +21,12 @@ npm run build
 npm test
 ```
 
+Corrida limpia (borra `runs/` y `output/`, recrea y ejecuta con config):
+
+```bash
+npm run scrape:fresh
+```
+
 ## Ejecucion basica
 
 ```bash
@@ -45,6 +51,15 @@ Parametros utiles:
 - `--log-format <json|pretty>`: salida de consola en JSON o coloreada (default `json`)
 - `--log-file <path>`: archivo para persistir logs JSONL (default `runs/<bot>/<runId>/logs.jsonl`)
 - `--download-mode <individual|bulk|both>`: modo de descarga de PDFs (default `individual`)
+- `--config <path>`: archivo JSON con defaults, `botJobs` y/o `botGroups` para no repetir flags largos
+- `--bot-jobs <json>`: lista JSON de jobs multi-bot (se ejecutan secuencialmente, uno por vez)
+- `--network-rps <n>`: requests/segundo globales del dispatcher (default `1`)
+- `--network-cooldown-ms <ms>`: cooldown base al detectar 429 (default `10000`)
+- `--network-cooldown-threshold <n>`: cantidad de 429 en ventana para escalar cooldown (default `3`)
+- `--network-cooldown-window-ms <ms>`: ventana de eventos 429 (default `30000`)
+- `--network-max-cooldown-ms <ms>`: maximo cooldown global (default `60000`)
+- `--network-jitter-ratio <0..1>`: jitter del rate limit global (default `0.2`)
+- `--max-consecutive-download-failures <n>`: aborta la corrida si hay `n` fallas de descarga seguidas (`0` desactiva, default `0`)
 
 ## Artefactos de salida
 
@@ -53,6 +68,7 @@ Parametros utiles:
 - `runs/<bot>/<runId>/failed.jsonl`: fallos para reintento
 - `runs/<bot>/<runId>/errors.jsonl`: tabla de errores por etapa
 - `runs/<bot>/<runId>/logs.jsonl`: logs estructurados persistidos
+- `runs/global.logs.jsonl`: log global consolidado de todas las corridas/jobs
 - `runs/<bot>/<runId>/artifacts/pdfs/`: PDFs descargados
 - `runs/<bot>/<runId>/artifacts/bulk/`: ZIPs de descarga masiva
 - `runs/<bot>/latest.json`: puntero a la corrida activa/reciente
@@ -96,14 +112,79 @@ Build de imagen:
 docker build -t scraping-bot .
 ```
 
-Ejecucion multi-bot:
+Ejecucion multi-bot secuencial (una sesion por job) + network queue global:
 
 ```bash
 docker compose up -d
-docker compose logs -f bot-civil
+docker compose logs -f bot-runner
+```
+
+## Cola de bots y cola de red
+
+Recomendado: usar archivo de configuracion para no pasar `--bot-jobs` y otros flags largos en cada ejecucion.
+
+Archivo ejemplo: `scraper.config.json`
+
+```json
+{
+  "defaults": {
+    "botConcurrency": 3,
+    "networkRps": 1,
+    "networkCooldownMs": 10000,
+    "networkCooldownThreshold": 3,
+    "networkCooldownWindowMs": 30000,
+    "networkJitterRatio": 0.2,
+    "requestDelayMs": 1200,
+    "requestJitterMs": 900,
+    "downloadMode": "individual",
+    "logFormat": "pretty",
+    "logLevel": "info"
+  },
+  "botGroups": [
+    {
+      "bot": "civil",
+      "maxPages": 2,
+      "searchTerms": ["herencia", "derecho a vivienda"]
+    },
+    {
+      "bot": "familia",
+      "maxPages": 2,
+      "searchTerms": ["tenencia", "alimentos"]
+    },
+    {
+      "bot": "impuestos",
+      "maxPages": 2,
+      "searchTerms": [
+        { "id": "impuestos-absueltos", "term": "empresarios absuelto evadir impuesto" }
+      ]
+    }
+  ]
+}
+```
+
+Ejecucion con config:
+
+```bash
+npm run scrape -- --config scraper.config.json
+```
+
+Prioridad de configuracion:
+- CLI (`--network-rps`, etc.)
+- `defaults` en `--config`
+- default interno del programa
+
+`botGroups` se expande automaticamente a jobs. Si defines ambos, se ejecutan `botJobs` + `botGroups`.
+
+`--bot-jobs` por CLI (si se pasa) reemplaza todo lo del archivo para esa ejecucion.
+
+Ejemplo local (3 bots en cola con rate limit global):
+
+```bash
+npm run scrape -- --bot-jobs "[{\"id\":\"civil\",\"bot\":\"civil\",\"searchTerm\":\"civil\",\"maxPages\":2},{\"id\":\"familia\",\"bot\":\"familia\",\"searchTerm\":\"familia\",\"maxPages\":2},{\"id\":\"impuestos\",\"bot\":\"impuestos\",\"searchTerm\":\"empresarios absuelto evadir impuesto\",\"maxPages\":2}]" --network-rps 1 --network-cooldown-ms 10000 --network-cooldown-threshold 3 --network-cooldown-window-ms 30000 --network-jitter-ratio 0.2 --download-mode individual --log-format pretty
 ```
 
 ## Notas
 
 - El portal puede devolver 429; el descargador aplica reintentos con backoff exponencial y jitter.
+- El dispatcher de red aplica un limite global de requests y cooldown adaptativo cuando detecta 429.
 - Los tests unitarios cubren secuencias simuladas de 429, agotamiento de reintentos y continuidad del procesamiento.
