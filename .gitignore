@@ -5,3 +5,5 @@ data/
 output/
 *.log
 *.tmp
+runs/
+*.har

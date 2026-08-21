@@ -1,16 +1,38 @@
-import { mkdtempSync, readFileSync } from "fs";
+import { mkdtempSync, readFileSync, readdirSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
 import { PortalClient } from "../src/portalClient";
 import { PdfDownloadService } from "../src/pdfDownloadService";
-import { RunStore } from "../src/runStore";
+import { buildRunStorePaths, RunStore } from "../src/runStore";
 import { ScrapeOrchestrator } from "../src/scrapeOrchestrator";
 import { ScraperConfig } from "../src/types";
 import { parseDocumentsFromPanelHtml } from "../src/resultParser";
 import { readJsonLines } from "../src/utils/fs";
 
 const fixturesDir = join(__dirname, "fixtures");
+
+function createConfig(temp: string, overrides: Partial<ScraperConfig> = {}): ScraperConfig {
+  return {
+    baseUrl: "https://example.com",
+    searchTerm: "civil",
+    bot: "civil",
+    runId: "run-test-001",
+    runsDir: join(temp, "runs"),
+    outputDir: join(temp, "pdfs"),
+    bulkOutputDir: join(temp, "bulk"),
+    dataDir: join(temp, "data"),
+    resume: false,
+    failedOnly: false,
+    requestDelayMs: 0,
+    requestJitterMs: 0,
+    logLevel: "info",
+    logFormat: "json",
+    logFilePath: join(temp, "logs.jsonl"),
+    downloadMode: "individual",
+    ...overrides,
+  };
+}
 
 describe("scrape orchestrator", () => {
   it("continues processing when one document fails", async () => {
@@ -50,18 +72,9 @@ describe("scrape orchestrator", () => {
       },
       fakeAxios,
     );
-    const runStore = new RunStore(join(temp, "data"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
 
-    const config: ScraperConfig = {
-      baseUrl: "https://example.com",
-      searchTerm: "civil",
-      outputDir: join(temp, "pdfs"),
-      dataDir: join(temp, "data"),
-      resume: false,
-      failedOnly: false,
-      logLevel: "info",
-      downloadMode: "individual",
-    };
+    const config = createConfig(temp);
 
     const orchestrator = new ScrapeOrchestrator(fakePortal, downloader, runStore, config);
     const summary = await orchestrator.run();
@@ -73,6 +86,9 @@ describe("scrape orchestrator", () => {
 
     const failures = await readJsonLines(join(temp, "data", "failed.jsonl"));
     expect(failures.length).toBeGreaterThanOrEqual(1);
+    const errors = await readJsonLines(join(temp, "data", "errors.jsonl"));
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors[0].stage).toBe("download");
   });
 
   it("resumes from progress by skipping processed ids", async () => {
@@ -95,7 +111,7 @@ describe("scrape orchestrator", () => {
     } as never;
 
     const temp = mkdtempSync(join(tmpdir(), "scraper-orch-resume-"));
-    const runStore = new RunStore(join(temp, "data"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
     await runStore.initialize();
 
     const progressPath = runStore.getPaths().progressPath;
@@ -115,16 +131,7 @@ describe("scrape orchestrator", () => {
       fakeAxios,
     );
 
-    const config: ScraperConfig = {
-      baseUrl: "https://example.com",
-      searchTerm: "civil",
-      outputDir: join(temp, "pdfs"),
-      dataDir: join(temp, "data"),
-      resume: true,
-      failedOnly: false,
-      logLevel: "info",
-      downloadMode: "individual",
-    };
+    const config = createConfig(temp, { resume: true });
 
     const orchestrator = new ScrapeOrchestrator(fakePortal, downloader, runStore, config);
     const summary = await orchestrator.run();
@@ -142,7 +149,7 @@ describe("scrape orchestrator", () => {
     } as unknown as PortalClient;
 
     const temp = mkdtempSync(join(tmpdir(), "scraper-orch-failed-only-"));
-    const runStore = new RunStore(join(temp, "data"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
     await runStore.initialize();
     await runStore.appendFailure({
       id: "x1",
@@ -160,16 +167,7 @@ describe("scrape orchestrator", () => {
       },
     } as unknown as PdfDownloadService;
 
-    const config: ScraperConfig = {
-      baseUrl: "https://example.com",
-      searchTerm: "civil",
-      outputDir: join(temp, "pdfs"),
-      dataDir: join(temp, "data"),
-      resume: false,
-      failedOnly: true,
-      logLevel: "info",
-      downloadMode: "individual",
-    };
+    const config = createConfig(temp, { failedOnly: true });
 
     const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
     const summary = await orchestrator.run();
@@ -224,18 +222,12 @@ describe("scrape orchestrator", () => {
     } as unknown as PdfDownloadService;
 
     const temp = mkdtempSync(join(tmpdir(), "scraper-orch-pages-"));
-    const runStore = new RunStore(join(temp, "data"));
-    const config: ScraperConfig = {
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, {
       baseUrl: "https://jurisprudencia.pj.gob.pe",
       searchTerm: "Mineria",
-      outputDir: join(temp, "pdfs"),
-      dataDir: join(temp, "data"),
-      resume: false,
-      failedOnly: false,
       maxPages: 3,
-      logLevel: "info",
-      downloadMode: "individual",
-    };
+    });
 
     const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
     const summary = await orchestrator.run();
@@ -264,18 +256,12 @@ describe("scrape orchestrator", () => {
     } as unknown as PdfDownloadService;
 
     const temp = mkdtempSync(join(tmpdir(), "scraper-orch-bulk-"));
-    const runStore = new RunStore(join(temp, "data"));
-    const config: ScraperConfig = {
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, {
       baseUrl: "https://jurisprudencia.pj.gob.pe",
-      searchTerm: "civil",
-      outputDir: join(temp, "pdfs"),
-      dataDir: join(temp, "data"),
-      resume: false,
-      failedOnly: false,
       maxPages: 1,
-      logLevel: "info",
       downloadMode: "bulk",
-    };
+    });
 
     const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
     const summary = await orchestrator.run();
@@ -284,5 +270,7 @@ describe("scrape orchestrator", () => {
     expect(summary.downloaded).toBe(0);
     expect(summary.bulkZipDownloaded).toBe(1);
     expect(bulkCalls).toBe(1);
+    const bulkFiles = readdirSync(join(temp, "bulk")).filter((name) => name.endsWith(".zip"));
+    expect(bulkFiles.length).toBe(1);
   });
 });

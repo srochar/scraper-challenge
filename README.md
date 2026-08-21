@@ -24,33 +24,43 @@ npm test
 ## Ejecucion basica
 
 ```bash
-npm run scrape -- --search civil --max-records 10
+npm run scrape -- --bot civil --search civil --max-records 10
 ```
 
 Parametros utiles:
 
+- `--bot <nombre>`: identificador del bot (default `default`)
+- `--runs-dir <path>`: carpeta base de corridas (default `runs`)
+- `--run-id <id>`: reutiliza una corrida especifica
 - `--base-url <url>`: URL del portal (por defecto jurisprudencia)
 - `--search <texto>`: texto de busqueda
 - `--max-records <n>`: limite de registros para corrida acotada
-- `--output-dir <path>`: carpeta de PDFs (por defecto `output/pdfs`)
-- `--data-dir <path>`: carpeta de estado y data (por defecto `data`)
-- `--resume`: reanuda desde `data/progress.json`
-- `--failed-only`: procesa solo fallidos registrados en `data/failed.jsonl`
+- `--request-delay-ms <ms>`: pausa fija entre solicitudes de descarga/ZIP (default `0`)
+- `--request-jitter-ms <ms>`: jitter aleatorio adicional por solicitud (default `0`)
+- `--output-dir <path>`: override legacy para carpeta de PDFs (default `runs/<bot>/<runId>/artifacts/pdfs`)
+- `--data-dir <path>`: override legacy para data de corrida (default `runs/<bot>/<runId>`)
+- `--resume`: reanuda desde la corrida activa (`runs/<bot>/latest.json`) o `--run-id`
+- `--failed-only`: procesa solo fallidos de la corrida objetivo
 - `--log-level <debug|info|warn|error>`: nivel de logs estructurados (default `info`)
-- `--log-file <path>`: archivo opcional para persistir logs JSONL
+- `--log-format <json|pretty>`: salida de consola en JSON o coloreada (default `json`)
+- `--log-file <path>`: archivo para persistir logs JSONL (default `runs/<bot>/<runId>/logs.jsonl`)
 - `--download-mode <individual|bulk|both>`: modo de descarga de PDFs (default `individual`)
 
 ## Artefactos de salida
 
-- `data/records.jsonl`: registros extraidos
-- `data/progress.json`: checkpoint de avance
-- `data/failed.jsonl`: fallos de descarga para reintento
-- `output/pdfs/`: PDFs descargados
+- `runs/<bot>/<runId>/records.jsonl`: registros extraidos
+- `runs/<bot>/<runId>/progress.json`: checkpoint de avance
+- `runs/<bot>/<runId>/failed.jsonl`: fallos para reintento
+- `runs/<bot>/<runId>/errors.jsonl`: tabla de errores por etapa
+- `runs/<bot>/<runId>/logs.jsonl`: logs estructurados persistidos
+- `runs/<bot>/<runId>/artifacts/pdfs/`: PDFs descargados
+- `runs/<bot>/<runId>/artifacts/bulk/`: ZIPs de descarga masiva
+- `runs/<bot>/latest.json`: puntero a la corrida activa/reciente
 
 ## Reintento de fallidos
 
 ```bash
-npm run scrape -- --failed-only
+npm run scrape -- --bot civil --failed-only
 ```
 
 ## Modos de descarga
@@ -62,9 +72,10 @@ npm run scrape -- --failed-only
 Ejemplos:
 
 ```bash
-npm run scrape -- --search "civil" --max-records 10 --max-pages 2 --download-mode individual
-npm run scrape -- --search "civil" --max-records 10 --max-pages 2 --download-mode bulk
-npm run scrape -- --search "civil" --max-records 10 --max-pages 2 --download-mode both
+npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode individual
+npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode bulk
+npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode both
+npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode individual --request-delay-ms 1200 --request-jitter-ms 900
 ```
 
 ## Logging profesional
@@ -74,7 +85,22 @@ El scraper emite logs estructurados en JSON por stdout/stderr.
 Ejemplo:
 
 ```bash
-npm run scrape -- --search "civil" --max-records 5 --max-pages 2 --log-level debug --log-file data/scraper.log.jsonl
+npm run scrape -- --bot civil --search "civil" --max-records 5 --max-pages 2 --log-level debug --log-format pretty
+```
+
+## Docker
+
+Build de imagen:
+
+```bash
+docker build -t scraping-bot .
+```
+
+Ejecucion multi-bot:
+
+```bash
+docker compose up -d
+docker compose logs -f bot-civil
 ```
 
 ## Notas

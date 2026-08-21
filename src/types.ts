@@ -26,6 +26,34 @@ export interface FailedRecord {
   timestamp: string;
 }
 
+export type RunStage =
+  | "init"
+  | "search"
+  | "paginate"
+  | "process"
+  | "download"
+  | "bulk"
+  | "finalize"
+  | "main";
+
+export interface RunErrorEvent {
+  timestamp: string;
+  runId: string;
+  bot: string;
+  stage: RunStage;
+  operation: string;
+  errorName: string;
+  errorMessage: string;
+  stack?: string;
+  recordId?: string;
+  page?: number;
+  url?: string;
+  statusCode?: number;
+  attempt?: number;
+  retryable?: boolean;
+  context?: Record<string, unknown>;
+}
+
 export interface RetryConfig {
   maxRetries: number;
   initialDelayMs: number;
@@ -46,16 +74,31 @@ export interface DownloadResult {
   reason?: string;
 }
 
+export interface ScrapeSummary {
+  processed: number;
+  downloaded: number;
+  missingPdf: number;
+  failed: number;
+  bulkZipDownloaded?: number;
+}
+
 export interface ScraperConfig {
   baseUrl: string;
   searchTerm: string;
+  bot: string;
+  runId: string;
+  runsDir: string;
   outputDir: string;
+  bulkOutputDir: string;
   dataDir: string;
   resume: boolean;
   failedOnly: boolean;
   maxRecords?: number;
   maxPages?: number;
+  requestDelayMs: number;
+  requestJitterMs: number;
   logLevel: "debug" | "info" | "warn" | "error";
+  logFormat: "json" | "pretty";
   logFilePath?: string;
   downloadMode: "individual" | "bulk" | "both";
 }
