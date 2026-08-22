@@ -44,7 +44,7 @@ Parametros utiles:
 - `--request-delay-ms <ms>`: pausa fija entre solicitudes de descarga PDF/ZIP (default `0`)
 - `--request-jitter-ms <ms>`: jitter aleatorio adicional por solicitud (default `0`)
 - `--output-dir <path>`: override para carpeta de PDFs individuales (default `runs/<bot>/<runId>/artifacts/pdfs`)
-- `--result-format <json|csv>`: formato de salida transformada (default `json`)
+- `--result-format <json|csv>`: formato de salida transformada (default `csv`)
 - `--data-dir <path>`: override legacy para data de corrida (default `runs/<bot>/<runId>`)
 - `--resume`: reanuda desde la corrida activa (`runs/<bot>/latest.json`) o `--run-id`
 - `--failed-only`: procesa solo fallidos de la corrida objetivo
@@ -145,7 +145,7 @@ Archivo ejemplo: `scraper.config.json`
     "requestDelayMs": 1200,
     "requestJitterMs": 900,
     "downloadMode": "individual",
-    "resultFormat": "json",
+    "resultFormat": "csv",
     "logFormat": "pretty",
     "logLevel": "info"
   },

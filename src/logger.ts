@@ -1,4 +1,5 @@
-import { appendFile } from "fs/promises";
+import { appendFile, mkdir } from "fs/promises";
+import { dirname } from "path";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -17,6 +18,10 @@ export interface LoggerOptions {
   logFilePath?: string;
   additionalLogFilePaths?: string[];
   context?: Record<string, unknown>;
+  persistence?: {
+    appendFile?: typeof appendFile;
+    mkdir?: typeof mkdir;
+  };
 }
 
 const order: Record<LogLevel, number> = {
@@ -84,7 +89,29 @@ class StructuredLogger implements Logger {
 
     const uniqueTargets = Array.from(new Set(fileTargets));
     for (const target of uniqueTargets) {
-      void appendFile(target, `${line}\n`, "utf8");
+      void this.persistLine(target, line);
+    }
+  }
+
+  private async persistLine(target: string, line: string): Promise<void> {
+    const append = this.options.persistence?.appendFile ?? appendFile;
+    const makeDir = this.options.persistence?.mkdir ?? mkdir;
+
+    try {
+      await append(target, `${line}\n`, "utf8");
+      return;
+    } catch (error) {
+      const code = (error as { code?: string } | undefined)?.code;
+      if (code !== "ENOENT") {
+        return;
+      }
+    }
+
+    try {
+      await makeDir(dirname(target), { recursive: true });
+      await append(target, `${line}\n`, "utf8");
+    } catch {
+      // Best-effort persistence: console logging already succeeded.
     }
   }
 }

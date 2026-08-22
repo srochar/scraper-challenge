@@ -398,7 +398,7 @@ function resolveResultFormat(
   fromCli: string | boolean | undefined,
   fromDefault: "csv" | "json" | undefined,
 ): "csv" | "json" {
-  const raw = fromCli ?? fromDefault ?? "json";
+  const raw = fromCli ?? fromDefault ?? "csv";
   if (typeof raw !== "string") {
     throw new Error("Unsupported result format. Use --result-format csv|json.");
   }

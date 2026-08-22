@@ -28,4 +28,29 @@ describe("logger", () => {
     expect(payload).toContain("INFO");
     expect(payload).toContain("test:");
   });
+
+  it("recovers from ENOENT when persisting logs", async () => {
+    const appendFile = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("ENOENT"), { code: "ENOENT" }))
+      .mockResolvedValue(undefined);
+    const mkdir = vi.fn().mockResolvedValue(undefined);
+
+    const logger = createLogger({
+      level: "info",
+      service: "test",
+      format: "json",
+      logFilePath: "runs/civil/run-1/logs.jsonl",
+      persistence: {
+        appendFile,
+        mkdir,
+      },
+    });
+
+    logger.info("hello");
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(appendFile).toHaveBeenCalledTimes(2);
+    expect(mkdir).toHaveBeenCalledTimes(1);
+  });
 });
