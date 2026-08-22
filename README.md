@@ -41,16 +41,18 @@ Parametros utiles:
 - `--base-url <url>`: URL del portal (por defecto jurisprudencia)
 - `--search <texto>`: texto de busqueda
 - `--max-records <n>`: limite de registros para corrida acotada
-- `--request-delay-ms <ms>`: pausa fija entre solicitudes de descarga/ZIP (default `0`)
+- `--request-delay-ms <ms>`: pausa fija entre solicitudes de descarga PDF/ZIP (default `0`)
 - `--request-jitter-ms <ms>`: jitter aleatorio adicional por solicitud (default `0`)
-- `--output-dir <path>`: override legacy para carpeta de PDFs (default `runs/<bot>/<runId>/artifacts/pdfs`)
+- `--output-dir <path>`: override para carpeta de PDFs individuales (default `runs/<bot>/<runId>/artifacts/pdfs`)
+- `--result-format <json|csv>`: formato de salida transformada (default `json`)
 - `--data-dir <path>`: override legacy para data de corrida (default `runs/<bot>/<runId>`)
 - `--resume`: reanuda desde la corrida activa (`runs/<bot>/latest.json`) o `--run-id`
 - `--failed-only`: procesa solo fallidos de la corrida objetivo
 - `--log-level <debug|info|warn|error>`: nivel de logs estructurados (default `info`)
 - `--log-format <json|pretty>`: salida de consola en JSON o coloreada (default `json`)
 - `--log-file <path>`: archivo para persistir logs JSONL (default `runs/<bot>/<runId>/logs.jsonl`)
-- `--download-mode <individual|bulk|both>`: modo de descarga de PDFs (default `individual`)
+- `--download-mode <individual|bulk|both>`: modo de descarga de ZIPs (default `individual`)
+- `--unzip [true|false]`: descomprime automaticamente cada ZIP descargado en una carpeta hermana (default `false`)
 - `--config <path>`: archivo JSON con defaults, `botJobs` y/o `botGroups` para no repetir flags largos
 - `--bot-jobs <json>`: lista JSON de jobs multi-bot (se ejecutan secuencialmente, uno por vez)
 - `--network-rps <n>`: requests/segundo globales del dispatcher (default `1`)
@@ -69,8 +71,10 @@ Parametros utiles:
 - `runs/<bot>/<runId>/errors.jsonl`: tabla de errores por etapa
 - `runs/<bot>/<runId>/logs.jsonl`: logs estructurados persistidos
 - `runs/global.logs.jsonl`: log global consolidado de todas las corridas/jobs
-- `runs/<bot>/<runId>/artifacts/pdfs/`: PDFs descargados
+- `runs/<bot>/<runId>/artifacts/pdfs/`: PDFs individuales descargados
 - `runs/<bot>/<runId>/artifacts/bulk/`: ZIPs de descarga masiva
+- `runs/<bot>/<runId>/results/records.json`: salida transformada JSON (si `--result-format json`)
+- `runs/<bot>/<runId>/results/records.csv`: salida transformada CSV (si `--result-format csv`)
 - `runs/<bot>/latest.json`: puntero a la corrida activa/reciente
 
 ## Reintento de fallidos
@@ -81,9 +85,11 @@ npm run scrape -- --bot civil --failed-only
 
 ## Modos de descarga
 
-- `individual`: descarga PDF por cada registro (`ServletDescarga?uuid=...`)
+- `individual`: descarga PDF por cada registro (cuando la pagina expone enlace de resolucion)
 - `bulk`: marca seleccionados y descarga ZIP de resoluciones
 - `both`: realiza ambos modos en una corrida
+
+Nota: si ves "muchas descargas", probablemente estas en modo `individual` (1 PDF por caso). Si el portal permite seleccionar todo y bajar un solo archivo, usa `--download-mode bulk`.
 
 Ejemplos:
 
@@ -91,7 +97,9 @@ Ejemplos:
 npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode individual
 npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode bulk
 npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode both
+npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode individual --result-format csv
 npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode individual --request-delay-ms 1200 --request-jitter-ms 900
+npm run scrape -- --bot civil --search "civil" --max-records 10 --max-pages 2 --download-mode bulk --unzip true
 ```
 
 ## Logging profesional
@@ -137,6 +145,7 @@ Archivo ejemplo: `scraper.config.json`
     "requestDelayMs": 1200,
     "requestJitterMs": 900,
     "downloadMode": "individual",
+    "resultFormat": "json",
     "logFormat": "pretty",
     "logLevel": "info"
   },

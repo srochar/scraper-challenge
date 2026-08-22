@@ -1,7 +1,7 @@
-import { basename, join } from "path";
+import { basename, join, relative } from "path";
 import { writeFile } from "fs/promises";
 import * as cheerio from "cheerio";
-import { DocumentRecord, FailedRecord, RunErrorEvent, ScrapeSummary, ScraperConfig, RunStage } from "./types";
+import { DocumentRecord, FailedRecord, RunErrorEvent, ScrapeSummary, ScraperConfig, RunStage, TransformedRecord } from "./types";
 import { PortalClient } from "./portalClient";
 import { parseDocumentsFromPanelHtml } from "./resultParser";
 import { PdfDownloadService } from "./pdfDownloadService";
@@ -9,7 +9,8 @@ import { resolvePdfUrl } from "./pdfResolver";
 import { RunStore } from "./runStore";
 import { Logger } from "./logger";
 import { NetworkDispatcher } from "./networkDispatcher";
-import { appendJsonLine, ensureDir } from "./utils/fs";
+import { extractZipToSiblingFolder } from "./zipExtractor";
+import { appendJsonLine, ensureDir, writeJson } from "./utils/fs";
 import { toSpanishErrorMessage } from "./utils/errorMessages";
 
 export class ScrapeOrchestrator {
@@ -25,10 +26,12 @@ export class ScrapeOrchestrator {
   async run(): Promise<ScrapeSummary> {
     await this.runStore.initialize();
     await ensureDir(this.config.outputDir);
+    await ensureDir(this.config.resultsDir);
     await ensureDir(this.config.bulkOutputDir);
     this.logger?.info("Run initialized", {
       accion: "inicializar",
       outputDir: this.config.outputDir,
+      resultsDir: this.config.resultsDir,
       dataDir: this.config.dataDir,
       runId: this.config.runId,
       bot: this.config.bot,
@@ -40,10 +43,11 @@ export class ScrapeOrchestrator {
 
     let processed = 0;
     let downloaded = 0;
-    let missingPdf = 0;
+    let missingLink = 0;
     let failed = 0;
     let bulkZipDownloaded = 0;
     let consecutiveDownloadFailures = 0;
+    const transformedRecords: TransformedRecord[] = [];
 
     if (this.config.failedOnly) {
       const failures = await this.runStore.readFailures();
@@ -54,8 +58,8 @@ export class ScrapeOrchestrator {
         const result = await this.safeDownload(record, "download.retry_failed");
         if (result.result.status === "downloaded") {
           downloaded += 1;
-        } else if (result.result.status === "missing_pdf") {
-          missingPdf += 1;
+        } else if (result.result.status === "missing_link") {
+          missingLink += 1;
         } else {
           failed += 1;
           if (result.failure) {
@@ -77,10 +81,21 @@ export class ScrapeOrchestrator {
             });
           }
         }
+        transformedRecords.push({
+          id: record.id,
+          title: record.title,
+          sourcePage: record.sourcePage,
+          metadata: record.metadata,
+          downloadUrl: record.pdfHref,
+          downloadStatus: result.result.status,
+          downloadAttempts: result.result.attempts,
+          downloadFile: result.result.filePath ? toRelativeRunPath(this.config.dataDir, result.result.filePath) : undefined,
+          downloadReason: result.result.reason,
+        });
         processed += 1;
       }
-
-      return { processed, downloaded, missingPdf, failed, bulkZipDownloaded };
+      await this.writeTransformedResults(transformedRecords);
+      return { processed, downloaded, missingLink, failed, bulkZipDownloaded };
     }
 
     const initResult = await this.safePortalInitWithRetry(
@@ -173,8 +188,8 @@ export class ScrapeOrchestrator {
         if (download.result.status === "downloaded") {
           downloaded += 1;
           consecutiveDownloadFailures = 0;
-        } else if (download.result.status === "missing_pdf") {
-          missingPdf += 1;
+        } else if (download.result.status === "missing_link") {
+          missingLink += 1;
           consecutiveDownloadFailures = 0;
         } else {
           failed += 1;
@@ -200,6 +215,29 @@ export class ScrapeOrchestrator {
           }
           this.assertFailureThreshold(consecutiveDownloadFailures);
         }
+
+        transformedRecords.push({
+          id: normalized.id,
+          title: normalized.title,
+          sourcePage: normalized.sourcePage,
+          metadata: normalized.metadata,
+          downloadUrl: normalized.pdfHref,
+          downloadStatus: download.result.status,
+          downloadAttempts: download.result.attempts,
+          downloadFile: download.result.filePath ? toRelativeRunPath(this.config.dataDir, download.result.filePath) : undefined,
+          downloadReason: download.result.reason,
+        });
+      } else {
+        transformedRecords.push({
+          id: normalized.id,
+          title: normalized.title,
+          sourcePage: normalized.sourcePage,
+          metadata: normalized.metadata,
+          downloadUrl: normalized.pdfHref,
+          downloadStatus: normalized.pdfHref ? "failed" : "missing_link",
+          downloadAttempts: 0,
+          downloadReason: normalized.pdfHref ? "not_attempted_download_mode_bulk" : "missing_link",
+        });
       }
       processed += 1;
       alreadyProcessed.add(normalized.id);
@@ -243,6 +281,18 @@ export class ScrapeOrchestrator {
             archivo: basename(zipPath),
             selectedCount: selectedWithBulk.length,
           });
+          if (this.config.unzip) {
+            try {
+              const extractedDir = await extractZipToSiblingFolder(zipPath);
+              this.logger?.info("ZIP masivo descomprimido", {
+                accion: "descomprimir_zip",
+                archivo: basename(zipPath),
+                destino: extractedDir,
+              });
+            } catch (error) {
+              await this.recordError("bulk", "unzip.bulk", error, { zipPath });
+            }
+          }
         }
       }
     }
@@ -251,11 +301,12 @@ export class ScrapeOrchestrator {
       accion: "resumen",
       processed,
       downloaded,
-      missingPdf,
+      missingLink,
       failed,
     });
 
-    return { processed, downloaded, missingPdf, failed, bulkZipDownloaded };
+    await this.writeTransformedResults(transformedRecords);
+    return { processed, downloaded, missingLink, failed, bulkZipDownloaded };
   }
 
   private assertFailureThreshold(consecutiveDownloadFailures: number): void {
@@ -375,7 +426,7 @@ export class ScrapeOrchestrator {
     throw new Error(`Unexpected recovery flow termination for ${operation}`);
   }
 
-  private async safeDownload(record: DocumentRecord, operation: string): Promise<{ result: { status: "downloaded" | "missing_pdf" | "failed"; attempts: number; pdfPath?: string; reason?: string }; failure?: FailedRecord }> {
+  private async safeDownload(record: DocumentRecord, operation: string): Promise<{ result: { status: "downloaded" | "missing_link" | "failed"; attempts: number; filePath?: string; reason?: string }; failure?: FailedRecord }> {
     try {
       return await this.executeNetwork(operation, async () => this.downloader.download(record));
     } catch (error) {
@@ -430,6 +481,56 @@ export class ScrapeOrchestrator {
     }
     return this.dispatcher.run(this.config.sessionKey, operation, fn);
   }
+
+  private async writeTransformedResults(records: TransformedRecord[]): Promise<void> {
+    const targetPath = join(this.config.resultsDir, this.config.resultFormat === "json" ? "records.json" : "records.csv");
+    if (this.config.resultFormat === "json") {
+      await writeJson(targetPath, records);
+      return;
+    }
+
+    const allMetadataKeys = Array.from(new Set(records.flatMap((record) => Object.keys(record.metadata)))).sort((a, b) => a.localeCompare(b));
+    const headers = [
+      "id",
+      "title",
+      "sourcePage",
+      ...allMetadataKeys.map((key) => `metadata.${key}`),
+      "downloadUrl",
+      "downloadStatus",
+      "downloadAttempts",
+      "downloadFile",
+      "downloadReason",
+    ];
+    const rows = records.map((record) => {
+      const metadataValues = allMetadataKeys.map((key) => record.metadata[key] ?? "");
+      return [
+        record.id,
+        record.title,
+        String(record.sourcePage),
+        ...metadataValues,
+        record.downloadUrl ?? "",
+        record.downloadStatus,
+        String(record.downloadAttempts),
+        record.downloadFile ?? "",
+        record.downloadReason ?? "",
+      ];
+    });
+    const csv = [headers, ...rows].map((row) => row.map((cell) => escapeCsvCell(cell)).join(",")).join("\n");
+    await writeFile(targetPath, `${csv}\n`, "utf8");
+  }
+
+}
+
+function escapeCsvCell(value: string): string {
+  if (/[",\n\r]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+function toRelativeRunPath(runRoot: string, filePath: string): string {
+  const rel = relative(runRoot, filePath);
+  return rel.split("\\").join("/");
 }
 
 function getErrorStatus(error: unknown): number | undefined {

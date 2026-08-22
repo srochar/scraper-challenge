@@ -38,10 +38,7 @@ export function parseDocumentsFromPanelHtml(panelHtml: string, sourcePage: numbe
       continue;
     }
 
-    const pdfHref = element
-      .find("a[href*='ServletDescarga'], a[href*='.pdf'], a[href*='pdf']")
-      .first()
-      .attr("href");
+    const pdfHref = findDownloadHref($, element);
     const metadata: Record<string, string> = {};
     const pairs = text.split("|").map((part) => part.trim()).filter(Boolean);
     pairs.forEach((pair, index) => {
@@ -84,11 +81,16 @@ function parseRichPanel($: cheerio.CheerioAPI, panel: unknown, sourcePage: numbe
   });
 
   const bulkFieldName = el.find("input[type='checkbox'][name]").first().attr("name") ?? undefined;
-  const downloadLink = el.find("a[onclick*='ServletDescarga'], a[href*='ServletDescarga']").first();
+  const downloadLink = el
+    .find("a")
+    .toArray()
+    .map((node) => $(node))
+    .find((candidate) => isDownloadAnchor(candidate)) ??
+    el.find("a[onclick*='ServletDescarga'], a[href*='ServletDescarga']").first();
   const href = downloadLink.attr("href") ?? undefined;
   const onclick = downloadLink.attr("onclick") ?? "";
   const uuid = onclick.match(/ServletDescarga\?uuid=([a-f0-9\-]{36})/i)?.[1];
-  const pdfHref = href ?? (uuid ? `/jurisprudenciaweb/ServletDescarga?uuid=${uuid}` : undefined);
+  const pdfHref = href ?? (isDownloadOnclick(onclick) && uuid ? `/jurisprudenciaweb/ServletDescarga?uuid=${uuid}` : undefined);
 
   const id = stableRecordId(metadata, `${title}|${sourcePage}`);
 
@@ -121,11 +123,10 @@ function parseTableRow($: cheerio.CheerioAPI, row: unknown, sourcePage: number):
     metadata[`field_${idx + 1}`] = value;
   });
 
-  const pdfHref =
-    $(rowNode).find("a[href*='ServletDescarga'], a[href*='.pdf'], a[href*='pdf']").first().attr("href") ?? undefined;
+  const pdfHref = findDownloadHref($, $(rowNode));
   const onclick = $(rowNode).find("a[onclick*='ServletDescarga'], a[onclick*='uuid=']").first().attr("onclick") ?? "";
   const onclickUuid = onclick.match(/uuid=([a-f0-9\-]{36})/i)?.[1];
-  const resolvedPdfHref = pdfHref ?? (onclickUuid ? `/jurisprudenciaweb/ServletDescarga?uuid=${onclickUuid}` : undefined);
+  const resolvedPdfHref = pdfHref ?? (isDownloadOnclick(onclick) && onclickUuid ? `/jurisprudenciaweb/ServletDescarga?uuid=${onclickUuid}` : undefined);
   const bulkFieldName =
     $(rowNode).find("input[type='checkbox'][name]").first().attr("name") ??
     inferBulkFieldNameFromOnclick(onclick);
@@ -149,6 +150,42 @@ function inferBulkFieldNameFromOnclick(onclick: string): string | undefined {
 
   const match = onclick.match(/formBuscador:repeat:\d+:j_idt457/);
   return match?.[0];
+}
+
+function findDownloadHref($: cheerio.CheerioAPI, element: cheerio.Cheerio<any>): string | undefined {
+  const anchors = element.find("a").toArray();
+  for (const anchor of anchors) {
+    const node = $(anchor);
+    if (isDownloadAnchor(node)) {
+      return node.attr("href") ?? undefined;
+    }
+  }
+  return undefined;
+}
+
+function isDownloadAnchor(anchor: cheerio.Cheerio<any>): boolean {
+  const href = (anchor.attr("href") ?? "").toLowerCase();
+  const onclick = (anchor.attr("onclick") ?? "").toLowerCase();
+  const text = anchor.text().toLowerCase();
+
+  if (href.includes("servletdescarga")) {
+    return true;
+  }
+
+  if (href.includes(".pdf") || href.includes("format=pdf") || href.includes("tipo=pdf")) {
+    return true;
+  }
+
+  if (text.includes("pdf") || text.includes("resoluci")) {
+    return true;
+  }
+
+  return isDownloadOnclick(onclick);
+}
+
+function isDownloadOnclick(onclick: string): boolean {
+  const normalized = onclick.toLowerCase();
+  return normalized.includes("servletdescarga") || normalized.includes("pdf") || normalized.includes("format=pdf") || normalized.includes("tipo=pdf");
 }
 
 function dedupeById(records: DocumentRecord[]): DocumentRecord[] {

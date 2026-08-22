@@ -15,6 +15,8 @@ describe("index config", () => {
     expect(config.runId.length).toBeGreaterThan(10);
     expect(config.dataDir).toContain(join(temp, "civil", config.runId));
     expect(config.outputDir).toContain(join(temp, "civil", config.runId, "artifacts", "pdfs"));
+    expect(config.resultsDir).toContain(join(temp, "civil", config.runId, "results"));
+    expect(config.resultFormat).toBe("json");
     expect(config.logFilePath).toContain(join(temp, "civil", config.runId, "logs.jsonl"));
   });
 

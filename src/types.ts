@@ -68,18 +68,32 @@ export interface RetryDependencies {
 }
 
 export interface DownloadResult {
-  status: "downloaded" | "missing_pdf" | "failed";
+  status: "downloaded" | "missing_link" | "failed";
   attempts: number;
-  pdfPath?: string;
+  filePath?: string;
   reason?: string;
 }
 
 export interface ScrapeSummary {
   processed: number;
   downloaded: number;
-  missingPdf: number;
+  missingLink: number;
   failed: number;
   bulkZipDownloaded?: number;
+}
+
+export type ResultFormat = "csv" | "json";
+
+export interface TransformedRecord {
+  id: string;
+  title: string;
+  sourcePage: number;
+  metadata: Record<string, string>;
+  downloadUrl?: string;
+  downloadStatus: "downloaded" | "missing_link" | "failed";
+  downloadAttempts: number;
+  downloadFile?: string;
+  downloadReason?: string;
 }
 
 export interface ScraperConfig {
@@ -89,6 +103,7 @@ export interface ScraperConfig {
   runId: string;
   runsDir: string;
   outputDir: string;
+  resultsDir: string;
   bulkOutputDir: string;
   dataDir: string;
   resume: boolean;
@@ -101,6 +116,8 @@ export interface ScraperConfig {
   logFormat: "json" | "pretty";
   logFilePath?: string;
   downloadMode: "individual" | "bulk" | "both";
+  resultFormat: ResultFormat;
+  unzip: boolean;
   sessionKey: string;
   maxConsecutiveDownloadFailures: number;
 }

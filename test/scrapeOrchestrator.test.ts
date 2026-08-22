@@ -20,6 +20,7 @@ function createConfig(temp: string, overrides: Partial<ScraperConfig> = {}): Scr
     runId: "run-test-001",
     runsDir: join(temp, "runs"),
     outputDir: join(temp, "pdfs"),
+    resultsDir: join(temp, "results"),
     bulkOutputDir: join(temp, "bulk"),
     dataDir: join(temp, "data"),
     resume: false,
@@ -30,6 +31,8 @@ function createConfig(temp: string, overrides: Partial<ScraperConfig> = {}): Scr
     logFormat: "json",
     logFilePath: join(temp, "logs.jsonl"),
     downloadMode: "individual",
+    resultFormat: "json",
+    unzip: false,
     sessionKey: "civil:test-session",
     maxConsecutiveDownloadFailures: 0,
     ...overrides,
@@ -91,6 +94,56 @@ describe("scrape orchestrator", () => {
     const errors = await readJsonLines(join(temp, "data", "errors.jsonl"));
     expect(errors.length).toBeGreaterThanOrEqual(1);
     expect(errors[0].stage).toBe("download");
+
+    const transformed = JSON.parse(readFileSync(join(temp, "results", "records.json"), "utf8")) as Array<{ downloadStatus: string }>;
+    expect(transformed.length).toBe(2);
+    expect(transformed.some((record) => record.downloadStatus === "failed")).toBe(true);
+    expect(transformed.some((record) => record.downloadStatus === "downloaded")).toBe(true);
+  });
+
+  it("keeps processing when one case has no zip link", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><div class="row">Doc A | Civil</div><div class="row">Doc B | Penal <a href="https://example.com/b.pdf">PDF</a></div></div>';
+
+    const fakePortal = {
+      initialize: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      search: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": panel },
+      }),
+    } as unknown as PortalClient;
+
+    let calls = 0;
+    const fakeAxios = {
+      get: async () => {
+        calls += 1;
+        return { status: 200, data: Buffer.from("PDF") };
+      },
+    } as never;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-missing-zip-"));
+    const downloader = new PdfDownloadService(
+      {
+        outputDir: join(temp, "pdfs"),
+        retryConfig: { maxRetries: 1, initialDelayMs: 1, backoffMultiplier: 2, maxDelayMs: 10, jitterRatio: 0 },
+        retryDeps: { wait: async () => undefined, random: () => 0 },
+      },
+      fakeAxios,
+    );
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp);
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, downloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(summary.processed).toBe(2);
+    expect(summary.downloaded).toBe(1);
+    expect(summary.missingLink).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(calls).toBe(1);
   });
 
   it("resumes from progress by skipping processed ids", async () => {
@@ -165,7 +218,7 @@ describe("scrape orchestrator", () => {
     const fakeDownloader = {
       download: async () => {
         calls += 1;
-        return { result: { status: "downloaded", attempts: 1, pdfPath: "x.pdf" } };
+        return { result: { status: "downloaded", attempts: 1, filePath: "x.pdf" } };
       },
     } as unknown as PdfDownloadService;
 
@@ -177,6 +230,45 @@ describe("scrape orchestrator", () => {
     expect(summary.processed).toBe(1);
     expect(summary.downloaded).toBe(1);
     expect(calls).toBe(1);
+
+    const transformed = JSON.parse(readFileSync(join(temp, "results", "records.json"), "utf8")) as Array<{ id: string }>;
+    expect(transformed.length).toBe(1);
+    expect(transformed[0].id).toBe("x1");
+  });
+
+  it("writes CSV transformed output when resultFormat is csv", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><div class="row">Doc A | Civil <a href="https://example.com/a.pdf">PDF</a></div><div class="row">Doc B | Penal <a href="https://example.com/b.pdf">PDF</a></div></div>';
+
+    const fakePortal = {
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      search: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": panel },
+      }),
+    } as unknown as PortalClient;
+
+    const fakeDownloader = {
+      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, filePath: "x.pdf" } }),
+    } as unknown as PdfDownloadService;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-csv-"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, { resultFormat: "csv" });
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(summary.processed).toBe(2);
+    const csvPath = join(temp, "results", "records.csv");
+    const csv = readFileSync(csvPath, "utf8");
+    expect(csv).toContain("downloadStatus");
+    expect(csv).toContain("metadata.field_1");
+    expect(csv).toContain("downloaded");
+    expect(readdirSync(join(temp, "results"))).toContain("records.csv");
+    expect(readdirSync(join(temp, "results"))).not.toContain("records.json");
   });
 
   it("traverses additional page until empty page is reached", async () => {
@@ -199,7 +291,7 @@ describe("scrape orchestrator", () => {
         raw: page1Xml,
         state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
         isPartial: true,
-        updates: { "formBuscador:panel": '<div id="formBuscador:panel"><div class="row">Expediente 1 | Materia civil <a href="/jurisprudenciaweb/ServletDescarga?uuid=c67a9b8b-0f70-413c-919a-598091c08781">PDF</a></div></div>' },
+        updates: { "formBuscador:panel": '<div id="formBuscador:panel"><div class="row">Expediente 1 | Materia civil <a href="/downloads/c67a9b8b-0f70-413c-919a-598091c08781.pdf">PDF</a></div></div>' },
       }),
       gotoPage: async (page: number) => {
         if (page === 2) {
@@ -207,7 +299,7 @@ describe("scrape orchestrator", () => {
             raw: page2Xml,
             state: { formId: "formBuscador", viewState: "3:3", formDefaults: {} },
             isPartial: true,
-            updates: { "formBuscador:panel": '<div id="formBuscador:panel"><div class="row">Expediente P2 | Penal <a href="/jurisprudenciaweb/ServletDescarga?uuid=11111111-1111-1111-1111-111111111111">PDF</a></div></div>' },
+            updates: { "formBuscador:panel": '<div id="formBuscador:panel"><div class="row">Expediente P2 | Penal <a href="/downloads/11111111-1111-1111-1111-111111111111.pdf">PDF</a></div></div>' },
           };
         }
         return {
@@ -220,7 +312,7 @@ describe("scrape orchestrator", () => {
     } as unknown as PortalClient;
 
     const fakeDownloader = {
-      download: async () => ({ result: { status: "downloaded", attempts: 1, pdfPath: "x.pdf" } }),
+      download: async () => ({ result: { status: "downloaded", attempts: 1, filePath: "x.pdf" } }),
     } as unknown as PdfDownloadService;
 
     const temp = mkdtempSync(join(tmpdir(), "scraper-orch-pages-"));
@@ -240,7 +332,7 @@ describe("scrape orchestrator", () => {
 
   it("downloads bulk zip when mode is bulk", async () => {
     const panel =
-      '<div id="formBuscador:panel"><table><tbody><tr><td>1</td><td>Doc A</td><td>Civil</td><td><a href="/jurisprudenciaweb/ServletDescarga?uuid=abc">PDF</a><input type="checkbox" name="formBuscador:repeat:0:j_idt457" /></td></tr></tbody></table></div>';
+      '<div id="formBuscador:panel"><table><tbody><tr><td>1</td><td>Doc A</td><td>Civil</td><td><a href="/downloads/abc.zip">ZIP</a><input type="checkbox" name="formBuscador:repeat:0:j_idt457" /></td></tr></tbody></table></div>';
 
     let bulkCalls = 0;
     const fakePortal = {
@@ -254,7 +346,7 @@ describe("scrape orchestrator", () => {
     } as unknown as PortalClient;
 
     const fakeDownloader = {
-      download: async () => ({ result: { status: "downloaded", attempts: 1, pdfPath: "x.pdf" } }),
+      download: async () => ({ result: { status: "downloaded", attempts: 1, filePath: "x.pdf" } }),
     } as unknown as PdfDownloadService;
 
     const temp = mkdtempSync(join(tmpdir(), "scraper-orch-bulk-"));
@@ -302,7 +394,7 @@ describe("scrape orchestrator", () => {
     } as unknown as PortalClient;
 
     const fakeDownloader = {
-      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, pdfPath: "x.pdf" } }),
+      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, filePath: "x.pdf" } }),
     } as unknown as PdfDownloadService;
 
     const temp = mkdtempSync(join(tmpdir(), "scraper-orch-recover-"));
@@ -390,7 +482,7 @@ describe("scrape orchestrator", () => {
     } as unknown as PortalClient;
 
     const fakeDownloader = {
-      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, pdfPath: "x.pdf" } }),
+      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, filePath: "x.pdf" } }),
     } as unknown as PdfDownloadService;
 
     const temp = mkdtempSync(join(tmpdir(), "scraper-orch-init-retry-"));

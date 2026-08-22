@@ -21,6 +21,7 @@ export interface RunManifest {
     requestDelayMs?: number;
     requestJitterMs?: number;
     downloadMode: "individual" | "bulk" | "both";
+    resultFormat: "csv" | "json";
   };
   summary?: ScrapeSummary;
 }
@@ -111,6 +112,7 @@ export function buildInitialManifest(config: ScraperConfig): RunManifest {
       requestDelayMs: config.requestDelayMs,
       requestJitterMs: config.requestJitterMs,
       downloadMode: config.downloadMode,
+      resultFormat: config.resultFormat,
     },
   };
 }

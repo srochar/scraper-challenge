@@ -39,9 +39,9 @@ export class PdfDownloadService {
       this.logger?.warn("Registro sin enlace PDF", { accion: "descarga", recordId: record.id });
       return {
         result: {
-          status: "missing_pdf",
+          status: "missing_link",
           attempts: 0,
-          reason: "missing_pdf",
+          reason: "missing_link",
         },
       };
     }
@@ -54,7 +54,7 @@ export class PdfDownloadService {
         result: {
           status: "downloaded",
           attempts: 0,
-          pdfPath: path,
+          filePath: path,
         },
       };
     }
@@ -115,7 +115,7 @@ export class PdfDownloadService {
       result: {
         status: "downloaded",
         attempts: outcome.attempts,
-        pdfPath: path,
+        filePath: path,
       },
     };
   }

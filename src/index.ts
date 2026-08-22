@@ -38,6 +38,8 @@ interface RuntimeDefaults {
   requestDelayMs?: number;
   requestJitterMs?: number;
   downloadMode?: "individual" | "bulk" | "both";
+  resultFormat?: "csv" | "json";
+  unzip?: boolean;
   botConcurrency?: number;
   maxConsecutiveDownloadFailures?: number;
   logLevel?: "debug" | "info" | "warn" | "error";
@@ -163,6 +165,7 @@ async function buildConfigFromArgs(
   const runRoot = join(runsDir, bot, runId);
   const dataDir = (args.get("data-dir") as string | undefined) ?? runRoot;
   const outputDir = (args.get("output-dir") as string | undefined) ?? join(runRoot, "artifacts", "pdfs");
+  const resultsDir = join(runRoot, "results");
   const bulkOutputDir = join(runRoot, "artifacts", "bulk");
   const logFilePath = (args.get("log-file") as string | undefined) ?? join(runRoot, "logs.jsonl");
   const baseUrl =
@@ -174,6 +177,8 @@ async function buildConfigFromArgs(
   await ensureDir(join(runsDir, bot));
   await writeJson(latestPath, { runId, updatedAt: new Date().toISOString() } as LatestPointer);
 
+  const resultFormat = resolveResultFormat(args.get("result-format"), defaults?.resultFormat);
+
   return {
     baseUrl,
     searchTerm,
@@ -181,6 +186,7 @@ async function buildConfigFromArgs(
     runId,
     runsDir,
     outputDir,
+    resultsDir,
     bulkOutputDir,
     dataDir,
     resume: Boolean(args.get("resume")),
@@ -196,6 +202,8 @@ async function buildConfigFromArgs(
       | "individual"
       | "bulk"
       | "both",
+    resultFormat,
+    unzip: resolveBooleanArg(args, "unzip", defaults?.unzip, false),
     sessionKey,
     maxConsecutiveDownloadFailures: resolveNumberArg(
       args,
@@ -259,7 +267,7 @@ async function runSingleConfig(config: ScraperConfig, dispatcher: NetworkDispatc
       accion: "fin",
       processed: summary.processed,
       downloaded: summary.downloaded,
-      missingPdf: summary.missingPdf,
+      missingLink: summary.missingLink,
       failed: summary.failed,
       bulkZipDownloaded: summary.bulkZipDownloaded,
     });
@@ -360,6 +368,47 @@ function resolveNumberArg(
   return fallback;
 }
 
+function resolveBooleanArg(
+  args: Map<string, string | boolean>,
+  key: string,
+  defaultValue: boolean | undefined,
+  fallback: boolean,
+): boolean {
+  const fromCli = args.get(key);
+  if (typeof fromCli === "boolean") {
+    return fromCli;
+  }
+  if (typeof fromCli === "string") {
+    const normalized = fromCli.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["0", "false", "no", "off"].includes(normalized)) {
+      return false;
+    }
+    return Boolean(normalized);
+  }
+  if (typeof defaultValue === "boolean") {
+    return defaultValue;
+  }
+  return fallback;
+}
+
+function resolveResultFormat(
+  fromCli: string | boolean | undefined,
+  fromDefault: "csv" | "json" | undefined,
+): "csv" | "json" {
+  const raw = fromCli ?? fromDefault ?? "json";
+  if (typeof raw !== "string") {
+    throw new Error("Unsupported result format. Use --result-format csv|json.");
+  }
+  const normalized = raw.toLowerCase();
+  if (normalized !== "json" && normalized !== "csv") {
+    throw new Error(`Unsupported result format '${normalized}'. Use --result-format csv|json.`);
+  }
+  return normalized;
+}
+
 export async function loadRuntimeConfig(configPath: string | undefined): Promise<RuntimeConfigFile> {
   const resolvedPath = resolveConfigPath(configPath);
   if (!resolvedPath) {
@@ -383,6 +432,9 @@ export async function loadRuntimeConfig(configPath: string | undefined): Promise
   const defaults = config.defaults;
   if (defaults && typeof defaults !== "object") {
     throw new Error(`Invalid config file '${resolvedPath}': defaults must be an object`);
+  }
+  if (defaults?.resultFormat !== undefined && typeof defaults.resultFormat !== "string") {
+    throw new Error(`Invalid config file '${resolvedPath}': defaults.resultFormat must be a string`);
   }
   if (config.botJobs && !Array.isArray(config.botJobs)) {
     throw new Error(`Invalid config file '${resolvedPath}': botJobs must be an array`);
