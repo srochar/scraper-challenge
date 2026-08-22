@@ -2,7 +2,7 @@ import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { buildConfig } from "../src/index";
+import { buildConfig, isSummarySuccessful } from "../src/index";
 
 describe("index config", () => {
   it("creates run-scoped defaults with bot and generated runId", async () => {
@@ -34,5 +34,10 @@ describe("index config", () => {
     await expect(buildConfig(["node", "script", "--bot", "robo", "--runs-dir", temp, "--resume"]))
       .rejects
       .toThrow(/No latest run found/);
+  });
+
+  it("treats summaries with failed downloads as unsuccessful", () => {
+    expect(isSummarySuccessful({ processed: 2, downloaded: 0, missingLink: 0, failed: 2, bulkZipDownloaded: 0 })).toBe(false);
+    expect(isSummarySuccessful({ processed: 2, downloaded: 2, missingLink: 0, failed: 0, bulkZipDownloaded: 0 })).toBe(true);
   });
 });

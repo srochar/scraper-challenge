@@ -197,3 +197,4 @@ npm run scrape -- --bot-jobs "[{\"id\":\"civil\",\"bot\":\"civil\",\"searchTerm\
 - El portal puede devolver 429; el descargador aplica reintentos con backoff exponencial y jitter.
 - El dispatcher de red aplica un limite global de requests y cooldown adaptativo cuando detecta 429.
 - Los tests unitarios cubren secuencias simuladas de 429, agotamiento de reintentos y continuidad del procesamiento.
+- En ejecucion multi-job, un job se reporta con `success: false` cuando termina con descargas fallidas (`summary.failed > 0`), aunque la corrida haya finalizado sin excepcion fatal.

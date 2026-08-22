@@ -6,7 +6,7 @@ import { PdfDownloadService } from "./pdfDownloadService";
 import { BotJob } from "./botQueue";
 import { buildInitialManifest, buildRunStorePaths, RunStore } from "./runStore";
 import { ScrapeOrchestrator } from "./scrapeOrchestrator";
-import { RetryConfig, RunErrorEvent, ScraperConfig } from "./types";
+import { RetryConfig, RunErrorEvent, ScrapeSummary, ScraperConfig } from "./types";
 import { createLogger, normalizeLogFormat, normalizeLogLevel } from "./logger";
 import { NetworkDispatcher } from "./networkDispatcher";
 import { stableHash } from "./utils/hash";
@@ -128,8 +128,16 @@ async function main(): Promise<void> {
         },
         runtimeConfig.defaults,
       );
-      await runSingleConfig(config, dispatcher);
-      results.push({ id: job.id, bot: job.bot, success: true });
+      const summary = await runSingleConfig(config, dispatcher);
+      const success = isSummarySuccessful(summary);
+      results.push({
+        id: job.id,
+        bot: job.bot,
+        success,
+        error: success
+          ? undefined
+          : `La corrida termino con ${summary.failed} descargas fallidas (processed=${summary.processed}, downloaded=${summary.downloaded}).`,
+      });
     } catch (error) {
       results.push({
         id: job.id,
@@ -214,7 +222,7 @@ async function buildConfigFromArgs(
   };
 }
 
-async function runSingleConfig(config: ScraperConfig, dispatcher: NetworkDispatcher): Promise<void> {
+async function runSingleConfig(config: ScraperConfig, dispatcher: NetworkDispatcher): Promise<ScrapeSummary> {
   const runStore = new RunStore(buildRunStorePaths(config.dataDir));
   await runStore.initialize();
   const manifest = buildInitialManifest(config);
@@ -278,6 +286,7 @@ async function runSingleConfig(config: ScraperConfig, dispatcher: NetworkDispatc
       summary,
     });
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+    return summary;
   } catch (error) {
     const message = toSpanishErrorMessage(error);
     const event: RunErrorEvent = {
@@ -407,6 +416,10 @@ function resolveResultFormat(
     throw new Error(`Unsupported result format '${normalized}'. Use --result-format csv|json.`);
   }
   return normalized;
+}
+
+export function isSummarySuccessful(summary: ScrapeSummary): boolean {
+  return summary.failed === 0;
 }
 
 export async function loadRuntimeConfig(configPath: string | undefined): Promise<RuntimeConfigFile> {
