@@ -1,0 +1,35 @@
+{
+  "environment": "dev",
+  "defaults": {
+    "botConcurrency": 1,
+    "networkRps": 1,
+    "networkCooldownMs": 10000,
+    "networkCooldownThreshold": 3,
+    "networkCooldownWindowMs": 30000,
+    "networkJitterRatio": 0.2,
+    "requestDelayMs": 1200,
+    "requestJitterMs": 900,
+    "maxConsecutiveDownloadFailures": 3,
+    "downloadMode": "bulk",
+    "unzip": true,
+    "logFormat": "pretty",
+    "logLevel": "debug"
+  },
+  "botGroups": [
+    {
+      "bot": "civil",
+      "maxPages": 2,
+      "searchTerms": [
+        "herencia",
+        "derecho a vivienda"
+      ]
+    },
+    {
+      "bot": "familia",
+      "maxPages": 2,
+      "searchTerms": [
+        "familia"
+      ]
+    }
+  ]
+}

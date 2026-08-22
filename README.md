@@ -75,6 +75,8 @@ Parametros utiles:
 - `runs/<bot>/<runId>/artifacts/bulk/`: ZIPs de descarga masiva
 - `runs/<bot>/<runId>/results/records.json`: salida transformada JSON (si `--result-format json`)
 - `runs/<bot>/<runId>/results/records.csv`: salida transformada CSV (si `--result-format csv`)
+- `runs/result-global.json`: salida consolidada global JSON en ejecuciones multi-bot (si `--result-format json`)
+- `runs/result-global.csv`: salida consolidada global CSV en ejecuciones multi-bot (si `--result-format csv`)
 - `runs/<bot>/latest.json`: puntero a la corrida activa/reciente
 
 ## Reintento de fallidos
@@ -88,6 +90,19 @@ npm run scrape -- --bot civil --failed-only
 - `individual`: descarga PDF por cada registro (cuando la pagina expone enlace de resolucion)
 - `bulk`: marca seleccionados y descarga ZIP de resoluciones
 - `both`: realiza ambos modos en una corrida
+
+En modo `bulk`, la descarga masiva se intenta por cada pagina procesada que tenga registros seleccionables; si una pagina falla o no devuelve ZIP, la corrida continua con las siguientes paginas.
+
+## Orden de resultados transformados
+
+La salida transformada (`records.csv`/`records.json`) mantiene orden deterministico para corridas equivalentes. El criterio es:
+
+1. `bot`
+2. `sourcePage`
+3. `title`
+4. `id`
+
+Ademas, cada registro incluye columnas/campos de procedencia (`bot`, `runId`) para trazabilidad en consolidaciones globales.
 
 Nota: si ves "muchas descargas", probablemente estas en modo `individual` (1 PDF por caso). Si el portal permite seleccionar todo y bajar un solo archivo, usa `--download-mode bulk`.
 
@@ -144,7 +159,8 @@ Archivo ejemplo: `scraper.config.json`
     "networkJitterRatio": 0.2,
     "requestDelayMs": 1200,
     "requestJitterMs": 900,
-    "downloadMode": "individual",
+    "downloadMode": "bulk",
+    "unzip": true,
     "resultFormat": "csv",
     "logFormat": "pretty",
     "logLevel": "info"
@@ -170,6 +186,12 @@ Archivo ejemplo: `scraper.config.json`
   ]
 }
 ```
+
+Configuracion DEV recomendada para este repo:
+
+- Define `"environment": "dev"` en `scraper.config.json` para identificar perfil local.
+- Mantiene `"downloadMode": "bulk"` para priorizar descarga grupal ZIP por pagina.
+- Activa `"unzip": true` para descomprimir automaticamente cada ZIP bulk en una carpeta hermana dentro de `artifacts/bulk/`.
 
 Ejecucion con config:
 
@@ -198,3 +220,5 @@ npm run scrape -- --bot-jobs "[{\"id\":\"civil\",\"bot\":\"civil\",\"searchTerm\
 - El dispatcher de red aplica un limite global de requests y cooldown adaptativo cuando detecta 429.
 - Los tests unitarios cubren secuencias simuladas de 429, agotamiento de reintentos y continuidad del procesamiento.
 - En ejecucion multi-job, un job se reporta con `success: false` cuando termina con descargas fallidas (`summary.failed > 0`), aunque la corrida haya finalizado sin excepcion fatal.
+- En `downloadMode=bulk`, el scraper ejecuta seleccion masiva por pagina y envia el submit final alineado al flujo real del portal (HAR), evitando campos extra que invaliden la seleccion.
+- Con `unzip=true`, por cada `*.zip` guardado en `runs/<bot>/<runId>/artifacts/bulk/` se crea una carpeta de extraccion con el mismo nombre base.

@@ -82,6 +82,8 @@ export class ScrapeOrchestrator {
           }
         }
         transformedRecords.push({
+          bot: this.config.bot,
+          runId: this.config.runId,
           id: record.id,
           title: record.title,
           sourcePage: record.sourcePage,
@@ -118,6 +120,10 @@ export class ScrapeOrchestrator {
         async () => this.portalClient.search(this.config.searchTerm),
       );
       page1Records = extractRecordsFromResponse(firstPage, 1);
+      this.logger?.debug("Fallback search records", {
+        accion: "buscar_fallback",
+        records: page1Records.length,
+      });
       shouldAttemptPagination = maxPages > 1 && (page1Records.length >= 10 || usedFallbackSearch);
     }
 
@@ -165,6 +171,7 @@ export class ScrapeOrchestrator {
 
       this.logger?.debug("Processing record", {
         recordId: normalized.id,
+        title: normalized.title,
         sourcePage: normalized.sourcePage,
         hasPdfHref: Boolean(normalized.pdfHref),
       });
@@ -217,6 +224,8 @@ export class ScrapeOrchestrator {
         }
 
         transformedRecords.push({
+          bot: this.config.bot,
+          runId: this.config.runId,
           id: normalized.id,
           title: normalized.title,
           sourcePage: normalized.sourcePage,
@@ -229,6 +238,8 @@ export class ScrapeOrchestrator {
         });
       } else {
         transformedRecords.push({
+          bot: this.config.bot,
+          runId: this.config.runId,
           id: normalized.id,
           title: normalized.title,
           sourcePage: normalized.sourcePage,
@@ -258,40 +269,52 @@ export class ScrapeOrchestrator {
     }
 
     if (this.config.downloadMode === "bulk" || this.config.downloadMode === "both") {
-      const selectedWithBulk = selected.filter((record) => Boolean(record.bulkFieldName));
-      if (selectedWithBulk.length > 0) {
-        await this.pace("bulk.download", { selectedCount: selectedWithBulk.length });
-        const zipData = await this.safePortal(
-          "bulk",
-          "downloadBulkZip",
-          async () => this.portalClient.downloadBulkZip(selectedWithBulk, this.config.searchTerm),
-          { selectedCount: selectedWithBulk.length },
-        );
-        if (zipData) {
-          const zipPath = join(this.config.bulkOutputDir, `Resoluciones_Jurisprudencia_${Date.now()}.zip`);
+      const selectedByPage = groupRecordsByPage(selected.filter((record) => Boolean(record.bulkFieldName)));
+      this.logger?.info("Bulk page grouping prepared", {
+        accion: "bulk_preparado",
+        pages: selectedByPage.map(([page, pageRecords]) => ({ page, selected: pageRecords.length })),
+      });
+      for (const [page, pageRecords] of selectedByPage) {
+        await this.pace("bulk.download", { selectedCount: pageRecords.length, page });
+        let zipData: Buffer | undefined;
+        try {
+          zipData = await this.safePortal(
+            "bulk",
+            "downloadBulkZip",
+            async () => this.portalClient.downloadBulkZip(pageRecords, this.config.searchTerm, page),
+            { selectedCount: pageRecords.length, page },
+          );
+        } catch {
+          continue;
+        }
+        if (!zipData) {
+          continue;
+        }
+
+        const zipPath = join(this.config.bulkOutputDir, `Resoluciones_Jurisprudencia_page-${page}_${Date.now()}.zip`);
+        try {
+          await writeFile(zipPath, zipData);
+        } catch (error) {
+          await this.recordError("bulk", "writeBulkZip", error, { zipPath, page });
+          throw error;
+        }
+        bulkZipDownloaded += 1;
+        this.logger?.info("ZIP masivo descargado", {
+          accion: "descarga_zip",
+          archivo: basename(zipPath),
+          selectedCount: pageRecords.length,
+          page,
+        });
+        if (this.config.unzip) {
           try {
-            await writeFile(zipPath, zipData);
+            const extractedDir = await extractZipToSiblingFolder(zipPath);
+            this.logger?.info("ZIP masivo descomprimido", {
+              accion: "descomprimir_zip",
+              archivo: basename(zipPath),
+              destino: extractedDir,
+            });
           } catch (error) {
-            await this.recordError("bulk", "writeBulkZip", error, { zipPath });
-            throw error;
-          }
-          bulkZipDownloaded = 1;
-          this.logger?.info("ZIP masivo descargado", {
-            accion: "descarga_zip",
-            archivo: basename(zipPath),
-            selectedCount: selectedWithBulk.length,
-          });
-          if (this.config.unzip) {
-            try {
-              const extractedDir = await extractZipToSiblingFolder(zipPath);
-              this.logger?.info("ZIP masivo descomprimido", {
-                accion: "descomprimir_zip",
-                archivo: basename(zipPath),
-                destino: extractedDir,
-              });
-            } catch (error) {
-              await this.recordError("bulk", "unzip.bulk", error, { zipPath });
-            }
+            await this.recordError("bulk", "unzip.bulk", error, { zipPath, page });
           }
         }
       }
@@ -398,10 +421,33 @@ export class ScrapeOrchestrator {
         return await this.executeNetwork(operation, fn);
       } catch (error) {
         const shouldRecover = isViewExpiredError(error);
+        const retryableTransient = isRetryableInitError(error);
         const exhausted = attempt >= maxRecoveryAttempts;
-        if (!shouldRecover || exhausted) {
+        if (!shouldRecover && !retryableTransient) {
           await this.recordError(stage, operation, error, context);
           throw error;
+        }
+
+        if (exhausted) {
+          await this.recordError(stage, operation, error, context);
+          throw error;
+        }
+
+        if (retryableTransient && !shouldRecover) {
+          const backoffMs = 600 * (attempt + 1);
+          this.logger?.warn("Reintentando operacion por error transitorio", {
+            accion: "reintento_operacion",
+            stage,
+            operation,
+            recoveryAttempt: attempt + 1,
+            maxRecoveryAttempts,
+            backoffMs,
+            statusCode: getErrorStatus(error),
+            errorMessage: toSpanishErrorMessage(error),
+            ...(context ?? {}),
+          });
+          await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+          continue;
         }
 
         this.logger?.warn("Recuperando sesion tras expiracion", {
@@ -413,12 +459,28 @@ export class ScrapeOrchestrator {
           ...(context ?? {}),
         });
 
-        await this.executeNetwork("recover.submitSearchFromInicio", async () =>
-          this.portalClient.submitSearchFromInicio(this.config.searchTerm),
-        );
+        try {
+          await this.executeNetwork("recover.submitSearchFromInicio", async () =>
+            this.portalClient.submitSearchFromInicio(this.config.searchTerm),
+          );
 
-        if (operation !== "search") {
-          await this.executeNetwork("recover.search", async () => this.portalClient.search(this.config.searchTerm));
+          if (operation !== "search") {
+            await this.executeNetwork("recover.search", async () => this.portalClient.search(this.config.searchTerm));
+          }
+        } catch (recoveryError) {
+          const backoffMs = 700 * (attempt + 1);
+          this.logger?.warn("Fallo recuperacion de sesion; se reintentara", {
+            accion: "recuperacion_fallida",
+            stage,
+            operation,
+            recoveryAttempt: attempt + 1,
+            maxRecoveryAttempts,
+            backoffMs,
+            statusCode: getErrorStatus(recoveryError),
+            errorMessage: toSpanishErrorMessage(recoveryError),
+            ...(context ?? {}),
+          });
+          await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
         }
       }
     }
@@ -483,14 +545,17 @@ export class ScrapeOrchestrator {
   }
 
   private async writeTransformedResults(records: TransformedRecord[]): Promise<void> {
+    const ordered = sortTransformedRecords(records);
     const targetPath = join(this.config.resultsDir, this.config.resultFormat === "json" ? "records.json" : "records.csv");
     if (this.config.resultFormat === "json") {
-      await writeJson(targetPath, records);
+      await writeJson(targetPath, ordered);
       return;
     }
 
-    const allMetadataKeys = Array.from(new Set(records.flatMap((record) => Object.keys(record.metadata)))).sort((a, b) => a.localeCompare(b));
+    const allMetadataKeys = Array.from(new Set(ordered.flatMap((record) => Object.keys(record.metadata)))).sort((a, b) => a.localeCompare(b));
     const headers = [
+      "bot",
+      "runId",
       "id",
       "title",
       "sourcePage",
@@ -501,9 +566,11 @@ export class ScrapeOrchestrator {
       "downloadFile",
       "downloadReason",
     ];
-    const rows = records.map((record) => {
+    const rows = ordered.map((record) => {
       const metadataValues = allMetadataKeys.map((key) => record.metadata[key] ?? "");
       return [
+        record.bot,
+        record.runId,
         record.id,
         record.title,
         String(record.sourcePage),
@@ -555,6 +622,37 @@ function applyBounds(records: DocumentRecord[], maxRecords: number | undefined, 
     return filtered;
   }
   return filtered.slice(0, maxRecords);
+}
+
+function groupRecordsByPage(records: DocumentRecord[]): Array<[number, DocumentRecord[]]> {
+  const map = new Map<number, DocumentRecord[]>();
+  for (const record of records) {
+    const page = record.sourcePage > 0 ? record.sourcePage : 1;
+    const bucket = map.get(page);
+    if (bucket) {
+      bucket.push(record);
+    } else {
+      map.set(page, [record]);
+    }
+  }
+  return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
+}
+
+function sortTransformedRecords(records: TransformedRecord[]): TransformedRecord[] {
+  return [...records].sort((a, b) => {
+    const botOrder = a.bot.localeCompare(b.bot);
+    if (botOrder !== 0) {
+      return botOrder;
+    }
+    if (a.sourcePage !== b.sourcePage) {
+      return a.sourcePage - b.sourcePage;
+    }
+    const titleOrder = a.title.localeCompare(b.title);
+    if (titleOrder !== 0) {
+      return titleOrder;
+    }
+    return a.id.localeCompare(b.id);
+  });
 }
 
 function failureToRecord(failure: FailedRecord): DocumentRecord {

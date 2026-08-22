@@ -1,6 +1,6 @@
 import { isAbsolute, join, resolve } from "path";
 import { randomBytes } from "crypto";
-import { readFile } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import { PortalClient } from "./portalClient";
 import { PdfDownloadService } from "./pdfDownloadService";
 import { BotJob } from "./botQueue";
@@ -66,6 +66,12 @@ interface BotGroupConfig {
   searchTerms: BotGroupSearch[];
 }
 
+interface RunResultSource {
+  path: string;
+  bot: string;
+  runId: string;
+}
+
 export function parseArgs(argv: string[]): Map<string, string | boolean> {
   const args = new Map<string, string | boolean>();
   for (let i = 2; i < argv.length; i += 1) {
@@ -115,6 +121,7 @@ async function main(): Promise<void> {
   }
 
   const results: Array<{ id: string; bot: string; success: boolean; error?: string }> = [];
+  const runResultSources: RunResultSource[] = [];
   for (const job of jobs) {
     try {
       const config = await buildConfigFromArgs(
@@ -129,14 +136,17 @@ async function main(): Promise<void> {
         runtimeConfig.defaults,
       );
       const summary = await runSingleConfig(config, dispatcher);
+      runResultSources.push({
+        path: join(config.resultsDir, config.resultFormat === "json" ? "records.json" : "records.csv"),
+        bot: config.bot,
+        runId: config.runId,
+      });
       const success = isSummarySuccessful(summary);
       results.push({
         id: job.id,
         bot: job.bot,
         success,
-        error: success
-          ? undefined
-          : `La corrida termino con ${summary.failed} descargas fallidas (processed=${summary.processed}, downloaded=${summary.downloaded}).`,
+        error: success ? undefined : buildUnsuccessfulSummaryMessage(summary),
       });
     } catch (error) {
       results.push({
@@ -148,10 +158,81 @@ async function main(): Promise<void> {
     }
   }
 
+  if (runResultSources.length > 0) {
+    const runsRoot = (args.get("runs-dir") as string | undefined) ?? join(process.cwd(), "runs");
+    await writeGlobalConsolidatedResults(
+      runsRoot,
+      runResultSources,
+    );
+  }
+
   process.stdout.write(`${JSON.stringify({ type: "bot-queue-results", results }, null, 2)}\n`);
   if (results.some((result) => !result.success)) {
     process.exit(1);
   }
+}
+
+export async function writeGlobalConsolidatedResults(
+  runsRootOrDir: string,
+  sources: RunResultSource[],
+): Promise<string | undefined> {
+  if (sources.length === 0) {
+    return undefined;
+  }
+
+  const isJson = sources[0].path.toLowerCase().endsWith(".json");
+  if (isJson) {
+    const merged: Array<Record<string, unknown>> = [];
+    for (const source of sources) {
+      try {
+        const raw = await readFile(source.path, "utf8");
+        const rows = JSON.parse(raw) as Array<Record<string, unknown>>;
+        if (!Array.isArray(rows)) {
+          continue;
+        }
+        for (const row of rows) {
+          merged.push({
+            ...row,
+            bot: typeof row.bot === "string" ? row.bot : source.bot,
+            runId: typeof row.runId === "string" ? row.runId : source.runId,
+          });
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    const ordered = merged.sort(compareGlobalRows);
+    const targetPath = join(runsRootOrDir, "result-global.json");
+    await writeFile(targetPath, `${JSON.stringify(ordered, null, 2)}\n`, "utf8");
+    return targetPath;
+  }
+
+  let header: string | undefined;
+  const bodyRows: string[] = [];
+  for (const source of sources) {
+    try {
+      const raw = await readFile(source.path, "utf8");
+      const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      if (lines.length === 0) {
+        continue;
+      }
+      if (!header) {
+        header = lines[0];
+      }
+      bodyRows.push(...lines.slice(1));
+    } catch {
+      continue;
+    }
+  }
+
+  if (!header) {
+    return undefined;
+  }
+
+  const targetPath = join(runsRootOrDir, "result-global.csv");
+  await writeFile(targetPath, `${[header, ...bodyRows].join("\n")}\n`, "utf8");
+  return targetPath;
 }
 
 async function buildConfigFromArgs(
@@ -175,6 +256,7 @@ async function buildConfigFromArgs(
   const outputDir = (args.get("output-dir") as string | undefined) ?? join(runRoot, "artifacts", "pdfs");
   const resultsDir = join(runRoot, "results");
   const bulkOutputDir = join(runRoot, "artifacts", "bulk");
+  const debugCaptureDir = join(runRoot, "debug", "http-captures");
   const logFilePath = (args.get("log-file") as string | undefined) ?? join(runRoot, "logs.jsonl");
   const baseUrl =
     (args.get("base-url") as string) ??
@@ -219,6 +301,7 @@ async function buildConfigFromArgs(
       defaults?.maxConsecutiveDownloadFailures,
       0,
     ),
+    debugCaptureDir,
   };
 }
 
@@ -253,6 +336,7 @@ async function runSingleConfig(config: ScraperConfig, dispatcher: NetworkDispatc
     baseUrl: config.baseUrl,
     initPath: "/faces/page/inicio.xhtml",
     resultPath: "/faces/page/resultado.xhtml",
+    debugCaptureDir: config.debugCaptureDir,
   }, undefined, logger.child({ module: "portalClient" }));
 
   const downloader = new PdfDownloadService({
@@ -419,7 +503,40 @@ function resolveResultFormat(
 }
 
 export function isSummarySuccessful(summary: ScrapeSummary): boolean {
+  if (summary.processed === 0) {
+    return false;
+  }
   return summary.failed === 0;
+}
+
+function buildUnsuccessfulSummaryMessage(summary: ScrapeSummary): string {
+  if (summary.processed === 0) {
+    return "La corrida termino sin registros procesados (processed=0).";
+  }
+  if (summary.failed > 0) {
+    return `La corrida termino con ${summary.failed} descargas fallidas (processed=${summary.processed}, downloaded=${summary.downloaded}).`;
+  }
+  return `La corrida termino en estado no exitoso (processed=${summary.processed}, downloaded=${summary.downloaded}, failed=${summary.failed}).`;
+}
+
+function compareGlobalRows(a: Record<string, unknown>, b: Record<string, unknown>): number {
+  const botOrder = String(a.bot ?? "").localeCompare(String(b.bot ?? ""));
+  if (botOrder !== 0) {
+    return botOrder;
+  }
+
+  const pageA = Number(a.sourcePage ?? 0);
+  const pageB = Number(b.sourcePage ?? 0);
+  if (pageA !== pageB) {
+    return pageA - pageB;
+  }
+
+  const titleOrder = String(a.title ?? "").localeCompare(String(b.title ?? ""));
+  if (titleOrder !== 0) {
+    return titleOrder;
+  }
+
+  return String(a.id ?? "").localeCompare(String(b.id ?? ""));
 }
 
 export async function loadRuntimeConfig(configPath: string | undefined): Promise<RuntimeConfigFile> {
