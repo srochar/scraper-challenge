@@ -85,6 +85,8 @@ export interface ScrapeSummary {
 export type ResultFormat = "csv" | "json";
 
 export interface TransformedRecord {
+  bot: string;
+  runId: string;
   id: string;
   title: string;
   sourcePage: number;
@@ -94,6 +96,10 @@ export interface TransformedRecord {
   downloadAttempts: number;
   downloadFile?: string;
   downloadReason?: string;
+  bulkDownloadStatus?: "downloaded" | "failed" | "not_requested" | "not_applicable";
+  bulkZipFile?: string;
+  bulkUnzipStatus?: "unzipped" | "unzip_failed" | "not_requested" | "not_applicable";
+  bulkUnzipDir?: string;
 }
 
 export interface ScraperConfig {
@@ -120,4 +126,5 @@ export interface ScraperConfig {
   unzip: boolean;
   sessionKey: string;
   maxConsecutiveDownloadFailures: number;
+  debugCaptureDir?: string;
 }

@@ -140,13 +140,44 @@ function renderPretty(payload: Record<string, unknown>): string {
   const errorMessage = payload.errorMessage !== undefined ? String(payload.errorMessage) : "";
   const color = levelColor[level] ?? "";
   const levelText = `${color}${level.toUpperCase()}${reset}`;
+  const extra = renderPrettyExtraMeta(payload);
   const core = [
     bot ? `bot=${bot}` : "",
     action ? `accion=${action}` : "",
     busqueda ? `busqueda=${busqueda}` : "",
+    extra,
   ].filter(Boolean).join(" ");
   const tail = errorMessage ? ` ${dim}error=${errorMessage}${reset}` : "";
   return `${dim}${ts}${reset} ${levelText} ${service}: ${core}${tail}`.trim();
+}
+
+function renderPrettyExtraMeta(payload: Record<string, unknown>): string {
+  const reserved = new Set(["ts", "level", "service", "message", "accion", "bot", "busqueda", "errorMessage", "stack"]);
+  const entries = Object.entries(payload)
+    .filter(([key, value]) => !reserved.has(key) && value !== undefined)
+    .map(([key, value]) => `${key}=${toPrettyValue(value)}`);
+  return entries.join(" ");
+}
+
+function toPrettyValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value.includes(" ") ? JSON.stringify(value) : value;
+  }
+  if (typeof value === "number" || typeof value === "boolean" || value === null) {
+    return String(value);
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    if (!serialized) {
+      return String(value);
+    }
+    if (serialized.length <= 180) {
+      return serialized;
+    }
+    return `${serialized.slice(0, 177)}...`;
+  } catch {
+    return String(value);
+  }
 }
 
 export function normalizeLogLevel(value: string | undefined): LogLevel {

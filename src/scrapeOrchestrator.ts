@@ -93,6 +93,8 @@ export class ScrapeOrchestrator {
           downloadAttempts: result.result.attempts,
           downloadFile: result.result.filePath ? toRelativeRunPath(this.config.dataDir, result.result.filePath) : undefined,
           downloadReason: result.result.reason,
+          bulkDownloadStatus: "not_applicable",
+          bulkUnzipStatus: "not_applicable",
         });
         processed += 1;
       }
@@ -163,17 +165,22 @@ export class ScrapeOrchestrator {
       skippedByResume: alreadyProcessed.size,
     });
 
+    let recordIndex = 0;
     for (const record of selected) {
+      recordIndex += 1;
       const normalized: DocumentRecord = {
         ...record,
         pdfHref: resolvePdfUrl(record, this.config.baseUrl),
       };
 
       this.logger?.debug("Processing record", {
+        recordIndex,
+        recordTotal: selected.length,
         recordId: normalized.id,
         title: normalized.title,
         sourcePage: normalized.sourcePage,
         hasPdfHref: Boolean(normalized.pdfHref),
+        item: normalized,
       });
 
       try {
@@ -235,6 +242,8 @@ export class ScrapeOrchestrator {
           downloadAttempts: download.result.attempts,
           downloadFile: download.result.filePath ? toRelativeRunPath(this.config.dataDir, download.result.filePath) : undefined,
           downloadReason: download.result.reason,
+          bulkDownloadStatus: normalized.bulkFieldName ? "not_requested" : "not_applicable",
+          bulkUnzipStatus: normalized.bulkFieldName ? "not_requested" : "not_applicable",
         });
       } else {
         transformedRecords.push({
@@ -248,6 +257,8 @@ export class ScrapeOrchestrator {
           downloadStatus: normalized.pdfHref ? "failed" : "missing_link",
           downloadAttempts: 0,
           downloadReason: normalized.pdfHref ? "not_attempted_download_mode_bulk" : "missing_link",
+          bulkDownloadStatus: normalized.bulkFieldName ? "not_requested" : "not_applicable",
+          bulkUnzipStatus: normalized.bulkFieldName ? "not_requested" : "not_applicable",
         });
       }
       processed += 1;
@@ -285,9 +296,17 @@ export class ScrapeOrchestrator {
             { selectedCount: pageRecords.length, page },
           );
         } catch {
+          applyBulkOutcomeForPage(transformedRecords, page, {
+            bulkDownloadStatus: "failed",
+            bulkUnzipStatus: this.config.unzip ? "unzip_failed" : "not_requested",
+          });
           continue;
         }
         if (!zipData) {
+          applyBulkOutcomeForPage(transformedRecords, page, {
+            bulkDownloadStatus: "failed",
+            bulkUnzipStatus: this.config.unzip ? "unzip_failed" : "not_requested",
+          });
           continue;
         }
 
@@ -299,6 +318,9 @@ export class ScrapeOrchestrator {
           throw error;
         }
         bulkZipDownloaded += 1;
+        const zipRelativePath = toRelativeRunPath(this.config.dataDir, zipPath);
+        let bulkUnzipStatus: "unzipped" | "unzip_failed" | "not_requested" = "not_requested";
+        let bulkUnzipDir: string | undefined;
         this.logger?.info("ZIP masivo descargado", {
           accion: "descarga_zip",
           archivo: basename(zipPath),
@@ -308,15 +330,25 @@ export class ScrapeOrchestrator {
         if (this.config.unzip) {
           try {
             const extractedDir = await extractZipToSiblingFolder(zipPath);
+            bulkUnzipStatus = "unzipped";
+            bulkUnzipDir = toRelativeRunPath(this.config.dataDir, extractedDir);
             this.logger?.info("ZIP masivo descomprimido", {
               accion: "descomprimir_zip",
               archivo: basename(zipPath),
               destino: extractedDir,
             });
           } catch (error) {
+            bulkUnzipStatus = "unzip_failed";
             await this.recordError("bulk", "unzip.bulk", error, { zipPath, page });
           }
         }
+
+        applyBulkOutcomeForPage(transformedRecords, page, {
+          bulkDownloadStatus: "downloaded",
+          bulkZipFile: zipRelativePath,
+          bulkUnzipStatus,
+          bulkUnzipDir,
+        });
       }
     }
 
@@ -565,6 +597,10 @@ export class ScrapeOrchestrator {
       "downloadAttempts",
       "downloadFile",
       "downloadReason",
+      "bulkDownloadStatus",
+      "bulkZipFile",
+      "bulkUnzipStatus",
+      "bulkUnzipDir",
     ];
     const rows = ordered.map((record) => {
       const metadataValues = allMetadataKeys.map((key) => record.metadata[key] ?? "");
@@ -580,6 +616,10 @@ export class ScrapeOrchestrator {
         String(record.downloadAttempts),
         record.downloadFile ?? "",
         record.downloadReason ?? "",
+        record.bulkDownloadStatus ?? "",
+        record.bulkZipFile ?? "",
+        record.bulkUnzipStatus ?? "",
+        record.bulkUnzipDir ?? "",
       ];
     });
     const csv = [headers, ...rows].map((row) => row.map((cell) => escapeCsvCell(cell)).join(",")).join("\n");
@@ -636,6 +676,30 @@ function groupRecordsByPage(records: DocumentRecord[]): Array<[number, DocumentR
     }
   }
   return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
+}
+
+function applyBulkOutcomeForPage(
+  records: TransformedRecord[],
+  page: number,
+  outcome: {
+    bulkDownloadStatus: "downloaded" | "failed" | "not_requested" | "not_applicable";
+    bulkZipFile?: string;
+    bulkUnzipStatus: "unzipped" | "unzip_failed" | "not_requested" | "not_applicable";
+    bulkUnzipDir?: string;
+  },
+): void {
+  for (const record of records) {
+    if (record.sourcePage !== page) {
+      continue;
+    }
+    if (record.bulkDownloadStatus === "not_applicable") {
+      continue;
+    }
+    record.bulkDownloadStatus = outcome.bulkDownloadStatus;
+    record.bulkZipFile = outcome.bulkZipFile;
+    record.bulkUnzipStatus = outcome.bulkUnzipStatus;
+    record.bulkUnzipDir = outcome.bulkUnzipDir;
+  }
 }
 
 function sortTransformedRecords(records: TransformedRecord[]): TransformedRecord[] {

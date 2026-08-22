@@ -29,6 +29,27 @@ describe("logger", () => {
     expect(payload).toContain("test:");
   });
 
+  it("includes non-core metadata in pretty format", () => {
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const logger = createLogger({ level: "debug", service: "test", format: "pretty", context: { bot: "familia", busqueda: "familia" } });
+
+    logger.debug("Processing record", {
+      recordIndex: 2,
+      recordTotal: 10,
+      recordId: "abc123",
+      title: "Apelacion 034983-2024",
+      item: { id: "abc123", sourcePage: 2 },
+    });
+
+    const payload = String(writeSpy.mock.calls[0][0]);
+    expect(payload).toContain("accion=Processing record");
+    expect(payload).toContain("recordIndex=2");
+    expect(payload).toContain("recordTotal=10");
+    expect(payload).toContain("recordId=abc123");
+    expect(payload).toContain("title=\"Apelacion 034983-2024\"");
+    expect(payload).toContain("item={\"id\":\"abc123\",\"sourcePage\":2}");
+  });
+
   it("recovers from ENOENT when persisting logs", async () => {
     const appendFile = vi
       .fn()

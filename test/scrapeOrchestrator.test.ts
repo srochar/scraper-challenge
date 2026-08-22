@@ -264,7 +264,10 @@ describe("scrape orchestrator", () => {
     expect(summary.processed).toBe(2);
     const csvPath = join(temp, "results", "records.csv");
     const csv = readFileSync(csvPath, "utf8");
+    expect(csv).toContain("bot,runId,id,title,sourcePage");
     expect(csv).toContain("downloadStatus");
+    expect(csv).toContain("bulkDownloadStatus");
+    expect(csv).toContain("bulkUnzipStatus");
     expect(csv).toContain("metadata.field_1");
     expect(csv).toContain("downloaded");
     expect(readdirSync(join(temp, "results"))).toContain("records.csv");
@@ -333,14 +336,25 @@ describe("scrape orchestrator", () => {
   it("downloads bulk zip when mode is bulk", async () => {
     const panel =
       '<div id="formBuscador:panel"><table><tbody><tr><td>1</td><td>Doc A</td><td>Civil</td><td><a href="/downloads/abc.zip">ZIP</a><input type="checkbox" name="formBuscador:repeat:0:j_idt457" /></td></tr></tbody></table></div>';
+    const panelPage2 =
+      '<div id="formBuscador:panel"><table><tbody><tr><td>2</td><td>Doc B</td><td>Penal</td><td><a href="/downloads/def.zip">ZIP</a><input type="checkbox" name="formBuscador:repeat:10:j_idt457" /></td></tr></tbody></table></div>';
 
-    let bulkCalls = 0;
+    const bulkCalls: number[] = [];
     const fakePortal = {
-      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" }, isPartial: false }),
+      submitSearchFromInicio: async () => ({
+        raw: '<html><body><div id="formBuscador:data1ds"></div></body></html>',
+        state: { formId: "formBuscador", viewState: "1:1", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" },
+        isPartial: false,
+      }),
       search: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "2:2", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" }, isPartial: true, updates: { "formBuscador:panel": panel } }),
-      gotoPage: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "3:3", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" }, isPartial: true, updates: { "formBuscador:panel": '<div id="formBuscador:panel"></div>' } }),
-      downloadBulkZip: async () => {
-        bulkCalls += 1;
+      gotoPage: async (page: number) => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "3:3", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" },
+        isPartial: true,
+        updates: { "formBuscador:panel": page === 2 ? panelPage2 : '<div id="formBuscador:panel"></div>' },
+      }),
+      downloadBulkZip: async (_records: Array<{ bulkFieldName?: string }>, _term: string, page?: number) => {
+        bulkCalls.push(page ?? 0);
         return Buffer.from("PK\u0003\u0004test");
       },
     } as unknown as PortalClient;
@@ -353,19 +367,126 @@ describe("scrape orchestrator", () => {
     const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
     const config = createConfig(temp, {
       baseUrl: "https://jurisprudencia.pj.gob.pe",
-      maxPages: 1,
+      maxPages: 3,
       downloadMode: "bulk",
     });
 
     const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
     const summary = await orchestrator.run();
 
-    expect(summary.processed).toBe(1);
+    expect(summary.processed).toBe(2);
     expect(summary.downloaded).toBe(0);
-    expect(summary.bulkZipDownloaded).toBe(1);
-    expect(bulkCalls).toBe(1);
+    expect(summary.bulkZipDownloaded).toBe(2);
+    expect(bulkCalls).toEqual([1, 2]);
     const bulkFiles = readdirSync(join(temp, "bulk")).filter((name) => name.endsWith(".zip"));
-    expect(bulkFiles.length).toBe(1);
+    expect(bulkFiles.length).toBe(2);
+
+    const transformed = JSON.parse(readFileSync(join(temp, "results", "records.json"), "utf8")) as Array<{
+      sourcePage: number;
+      bulkDownloadStatus?: string;
+      bulkZipFile?: string;
+      bulkUnzipStatus?: string;
+    }>;
+    expect(transformed).toHaveLength(2);
+    expect(transformed.every((row) => row.bulkDownloadStatus === "downloaded")).toBe(true);
+    expect(transformed.every((row) => row.bulkUnzipStatus === "not_requested")).toBe(true);
+    expect(transformed.every((row) => (row.bulkZipFile ?? "").includes("Resoluciones_Jurisprudencia_page-"))).toBe(true);
+    expect(transformed.every((row) => (row.bulkZipFile ?? "").endsWith(".zip"))).toBe(true);
+  });
+
+  it("continues bulk processing for next page when one page bulk download fails", async () => {
+    const panelPage1 =
+      '<div id="formBuscador:panel"><table><tbody><tr><td>1</td><td>Doc A</td><td>Civil</td><td><input type="checkbox" name="formBuscador:repeat:0:j_idt457" /></td></tr></tbody></table></div>';
+    const panelPage2 =
+      '<div id="formBuscador:panel"><table><tbody><tr><td>2</td><td>Doc B</td><td>Penal</td><td><input type="checkbox" name="formBuscador:repeat:10:j_idt457" /></td></tr></tbody></table></div>';
+
+    const attemptedPages: number[] = [];
+    const fakePortal = {
+      submitSearchFromInicio: async () => ({
+        raw: '<html><body><div id="formBuscador:data1ds"></div></body></html>',
+        state: { formId: "formBuscador", viewState: "1:1", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" },
+        isPartial: false,
+      }),
+      search: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" },
+        isPartial: true,
+        updates: { "formBuscador:panel": panelPage1 },
+      }),
+      gotoPage: async (page: number) => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "3:3", formDefaults: {}, bulkSubmitField: "formBuscador:j_idt422" },
+        isPartial: true,
+        updates: { "formBuscador:panel": page === 2 ? panelPage2 : '<div id="formBuscador:panel"></div>' },
+      }),
+      downloadBulkZip: async (_records: Array<{ bulkFieldName?: string }>, _term: string, page?: number) => {
+        attemptedPages.push(page ?? 0);
+        if (page === 1) {
+          throw new Error("bulk failed page 1");
+        }
+        return Buffer.from("PK\u0003\u0004test");
+      },
+    } as unknown as PortalClient;
+
+    const fakeDownloader = {
+      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, filePath: "x.pdf" } }),
+    } as unknown as PdfDownloadService;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-bulk-continue-"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, {
+      baseUrl: "https://jurisprudencia.pj.gob.pe",
+      maxPages: 3,
+      downloadMode: "bulk",
+    });
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(summary.processed).toBe(2);
+    expect(summary.bulkZipDownloaded).toBe(1);
+    expect(attemptedPages).toEqual([1, 2]);
+
+    const transformed = JSON.parse(readFileSync(join(temp, "results", "records.json"), "utf8")) as Array<{
+      sourcePage: number;
+      bulkDownloadStatus?: string;
+    }>;
+    expect(transformed).toHaveLength(2);
+    const page1 = transformed.find((row) => row.sourcePage === 1);
+    const page2 = transformed.find((row) => row.sourcePage === 2);
+    expect(page1?.bulkDownloadStatus).toBe("failed");
+    expect(page2?.bulkDownloadStatus).toBe("downloaded");
+  });
+
+  it("writes deterministic order in transformed json output", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><div class="row">Zulu | Civil <a href="https://example.com/z.pdf">PDF</a></div><div class="row">Alpha | Civil <a href="https://example.com/a.pdf">PDF</a></div></div>';
+
+    const fakePortal = {
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      search: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": panel },
+      }),
+    } as unknown as PortalClient;
+
+    const fakeDownloader = {
+      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, filePath: "x.pdf" } }),
+    } as unknown as PdfDownloadService;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-order-"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, { resultFormat: "json" });
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
+    await orchestrator.run();
+
+    const transformed = JSON.parse(readFileSync(join(temp, "results", "records.json"), "utf8")) as Array<{ title: string; bot: string; runId: string }>;
+    expect(transformed.map((item) => item.title)).toEqual(["Alpha", "Zulu"]);
+    expect(transformed.every((item) => item.bot === "civil")).toBe(true);
+    expect(transformed.every((item) => item.runId === "run-test-001")).toBe(true);
   });
 
   it("recovers session and retries search on ViewExpiredException", async () => {
@@ -408,6 +529,56 @@ describe("scrape orchestrator", () => {
     expect(summary.downloaded).toBe(1);
     expect(searchCalls).toBe(2);
     expect(submitCalls).toBe(2);
+  });
+
+  it("retries pagination on transient 500 before succeeding", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><div class="row">Doc A | Civil <a href="https://example.com/a.pdf">PDF</a></div></div>';
+
+    let gotoCalls = 0;
+    const fakePortal = {
+      submitSearchFromInicio: async () => ({
+        raw: `<html><body>${panel}<div id="formBuscador:data1ds"></div></body></html>`,
+        state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} },
+        isPartial: false,
+      }),
+      search: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": panel },
+      }),
+      gotoPage: async () => {
+        gotoCalls += 1;
+        if (gotoCalls === 1) {
+          const err = new Error("Request failed with status code 500") as Error & {
+            response?: { status: number };
+          };
+          err.response = { status: 500 };
+          throw err;
+        }
+        return {
+          raw: "",
+          state: { formId: "formBuscador", viewState: "3:3", formDefaults: {} },
+          isPartial: true,
+          updates: { "formBuscador:panel": '<div id="formBuscador:panel"></div>' },
+        };
+      },
+    } as unknown as PortalClient;
+
+    const fakeDownloader = {
+      download: async () => ({ result: { status: "downloaded" as const, attempts: 1, filePath: "x.pdf" } }),
+    } as unknown as PdfDownloadService;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-paginate-500-"));
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, { maxPages: 2 });
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(summary.processed).toBe(1);
+    expect(gotoCalls).toBe(2);
   });
 
   it("aborts run when consecutive download failures threshold is reached", async () => {
