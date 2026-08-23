@@ -213,6 +213,7 @@ async function runSingleConfig(config: ScraperConfig, dispatcher: ReturnType<typ
     initPath: "/faces/page/inicio.xhtml",
     resultPath: "/faces/page/resultado.xhtml",
     debugCaptureDir: config.debugCaptureDir,
+    requestTimeoutMs: 30_000,
   }, undefined, logger.child({ module: "portalClient" }));
 
   const downloader = new PdfDownloadService({

@@ -19,6 +19,7 @@ export interface PortalClientOptions {
   initPath?: string;
   resultPath?: string;
   debugCaptureDir?: string;
+  requestTimeoutMs?: number;
 }
 
 export interface PortalResponse {
@@ -57,6 +58,7 @@ export class PortalClient {
           baseURL: options.baseUrl,
           withCredentials: true,
           jar,
+          timeout: options.requestTimeoutMs ?? 30_000,
           headers: {
             "User-Agent": this.browserUserAgent,
             "Accept-Language": "es-US,es-419;q=0.9,es;q=0.8",
