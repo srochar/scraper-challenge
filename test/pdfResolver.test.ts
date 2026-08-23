@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolvePdfUrl } from "../src/pdfResolver";
+import { resolvePdfUrl } from "../src/download/pdfResolver";
 import { DocumentRecord } from "../src/types";
 
 const baseRecord: DocumentRecord = {

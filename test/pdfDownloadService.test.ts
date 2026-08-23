@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { tmpdir } from "os";
 import { join } from "path";
 import { existsSync, mkdtempSync } from "fs";
-import { buildPdfFileName, PdfDownloadService } from "../src/pdfDownloadService";
+import { buildPdfFileName, PdfDownloadService } from "../src/download/pdfDownloadService";
 import { DocumentRecord } from "../src/types";
 
 function record(pdfHref?: string): DocumentRecord {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDocumentsFromPanelHtml } from "../src/resultParser";
+import { parseDocumentsFromPanelHtml } from "../src/parsing/resultParser";
 
 describe("result parser", () => {
   it("extracts records and deterministic ids", () => {

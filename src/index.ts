@@ -1,311 +1,187 @@
-import { isAbsolute, join, resolve } from "path";
-import { randomBytes } from "crypto";
-import { readFile, writeFile } from "fs/promises";
-import { PortalClient } from "./portalClient";
-import { PdfDownloadService } from "./pdfDownloadService";
-import { BotJob } from "./botQueue";
-import { buildInitialManifest, buildRunStorePaths, RunStore } from "./runStore";
+import { join } from "path";
+import { PortalClient } from "./portal/client";
+import { PdfDownloadService } from "./download/pdfDownloadService";
+import { buildInitialManifest, buildRunStorePaths, RunStore } from "./storage/runStore";
 import { ScrapeOrchestrator } from "./scrapeOrchestrator";
 import { RetryConfig, RunErrorEvent, ScrapeSummary, ScraperConfig } from "./types";
-import { createLogger, normalizeLogFormat, normalizeLogLevel } from "./logger";
-import { NetworkDispatcher } from "./networkDispatcher";
-import { stableHash } from "./utils/hash";
-import { ensureDir, readJson, writeJson } from "./utils/fs";
+import { createLogger, normalizeLogFormat, normalizeLogLevel } from "./logging/logger";
+import { createDispatcher } from "./runtime/dispatcher";
+import { buildConfig, buildConfigFromArgs, expandConfigBotJobs, generateRunId, loadRuntimeConfig, parseArgs } from "./runtime/config";
+import { toFatalErrorPayload } from "./runtime/fatal";
+import { parseBotJobs } from "./runtime/jobs";
+import { buildUnsuccessfulSummaryMessage, isSummarySuccessful, writeGlobalConsolidatedResults } from "./runtime/results";
 import { toSpanishErrorMessage } from "./utils/errorMessages";
-
-export interface LatestPointer {
-  runId: string;
-  updatedAt: string;
-}
-
-export interface FatalErrorPayload {
-  type: "fatal";
-  stage: "main";
-  operation: string;
-  errorName: string;
-  errorMessage: string;
-  runId?: string;
-  bot?: string;
-}
-
-interface RuntimeDefaults {
-  networkRps?: number;
-  networkCooldownMs?: number;
-  networkCooldownWindowMs?: number;
-  networkCooldownThreshold?: number;
-  networkMaxCooldownMs?: number;
-  networkJitterRatio?: number;
-  requestDelayMs?: number;
-  requestJitterMs?: number;
-  downloadMode?: "individual" | "bulk" | "both";
-  resultFormat?: "csv" | "json";
-  unzip?: boolean;
-  botConcurrency?: number;
-  maxConsecutiveDownloadFailures?: number;
-  logLevel?: "debug" | "info" | "warn" | "error";
-  logFormat?: "json" | "pretty";
-}
-
-interface RuntimeConfigFile {
-  defaults?: RuntimeDefaults;
-  botJobs?: BotJob[];
-  botGroups?: BotGroupConfig[];
-}
-
-type BotGroupSearch = string | {
-  id?: string;
-  term: string;
-  maxPages?: number;
-  maxRecords?: number;
-};
-
-interface BotGroupConfig {
-  bot: string;
-  maxPages?: number;
-  maxRecords?: number;
-  searchTerms: BotGroupSearch[];
-}
-
-interface RunResultSource {
-  path: string;
-  bot: string;
-  runId: string;
-}
-
-export function parseArgs(argv: string[]): Map<string, string | boolean> {
-  const args = new Map<string, string | boolean>();
-  for (let i = 2; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      const next = argv[i + 1];
-      if (!next || next.startsWith("--")) {
-        args.set(key, true);
-      } else {
-        args.set(key, next);
-        i += 1;
-      }
-    }
-  }
-
-  return args;
-}
-
-export async function buildConfig(argv: string[]): Promise<ScraperConfig> {
-  const args = parseArgs(argv);
-  const runtimeConfig = await loadRuntimeConfig(args.get("config") as string | undefined);
-  return buildConfigFromArgs(args, undefined, runtimeConfig.defaults);
-}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
   const runtimeConfig = await loadRuntimeConfig(args.get("config") as string | undefined);
+  const runsRoot = (args.get("runs-dir") as string | undefined) ?? join(process.cwd(), "runs");
+  const processLogger = createLogger({
+    level: normalizeLogLevel((args.get("log-level") as string | undefined) ?? runtimeConfig.defaults?.logLevel),
+    format: normalizeLogFormat((args.get("log-format") as string | undefined) ?? runtimeConfig.defaults?.logFormat),
+    service: "scraping-bot",
+    logFilePath: join(runsRoot, "global.logs.jsonl"),
+    context: { module: "main" },
+  });
   const dispatcher = createDispatcher(args, runtimeConfig.defaults);
   const jobs = parseBotJobs(
     args.get("bot-jobs") as string | undefined,
     expandConfigBotJobs(runtimeConfig),
   );
+  const processStartedAtMs = Date.now();
+  const processStartedAt = new Date(processStartedAtMs).toISOString();
+  processLogger.info("Inicio de proceso total", {
+    accion: "inicio_proceso_total",
+    startedAt: processStartedAt,
+    jobsPlanned: jobs.length > 0 ? jobs.length : 1,
+    queueMode: jobs.length > 0,
+  });
+  let processSuccess = false;
+  let processErrorMessage: string | undefined;
 
-  if (jobs.length === 0) {
-    const config = await buildConfigFromArgs(args, undefined, runtimeConfig.defaults);
-    try {
-      await runSingleConfig(config, dispatcher);
-    } catch (error) {
-      process.stderr.write(`${JSON.stringify(toFatalErrorPayload(error, "main", {
-        runId: config.runId,
+  try {
+    if (jobs.length === 0) {
+      const config = await buildConfigFromArgs(args, undefined, runtimeConfig.defaults);
+      const spiderStartedAtMs = Date.now();
+      const spiderStartedAt = new Date(spiderStartedAtMs).toISOString();
+      processLogger.info("Inicio de arana", {
+        accion: "inicio_arana",
         bot: config.bot,
-      }))}\n`);
-      process.exit(1);
-    }
-    return;
-  }
-
-  const results: Array<{ id: string; bot: string; success: boolean; error?: string }> = [];
-  const runResultSources: RunResultSource[] = [];
-  for (const job of jobs) {
-    try {
-      const config = await buildConfigFromArgs(
-        args,
-        {
-          bot: job.bot,
-          searchTerm: job.searchTerm,
-          maxPages: job.maxPages,
-          maxRecords: job.maxRecords,
-          runId: generateRunId(),
-        },
-        runtimeConfig.defaults,
-      );
-      const summary = await runSingleConfig(config, dispatcher);
-      runResultSources.push({
-        path: join(config.resultsDir, config.resultFormat === "json" ? "records.json" : "records.csv"),
-        bot: config.bot,
+        busqueda: config.searchTerm,
         runId: config.runId,
+        startedAt: spiderStartedAt,
       });
-      const success = isSummarySuccessful(summary);
-      results.push({
-        id: job.id,
-        bot: job.bot,
-        success,
-        error: success ? undefined : buildUnsuccessfulSummaryMessage(summary),
-      });
-    } catch (error) {
-      results.push({
-        id: job.id,
-        bot: job.bot,
-        success: false,
-        error: toSpanishErrorMessage(error),
-      });
-    }
-  }
-
-  if (runResultSources.length > 0) {
-    const runsRoot = (args.get("runs-dir") as string | undefined) ?? join(process.cwd(), "runs");
-    await writeGlobalConsolidatedResults(
-      runsRoot,
-      runResultSources,
-    );
-  }
-
-  process.stdout.write(`${JSON.stringify({ type: "bot-queue-results", results }, null, 2)}\n`);
-  if (results.some((result) => !result.success)) {
-    process.exit(1);
-  }
-}
-
-export async function writeGlobalConsolidatedResults(
-  runsRootOrDir: string,
-  sources: RunResultSource[],
-): Promise<string | undefined> {
-  if (sources.length === 0) {
-    return undefined;
-  }
-
-  const isJson = sources[0].path.toLowerCase().endsWith(".json");
-  if (isJson) {
-    const merged: Array<Record<string, unknown>> = [];
-    for (const source of sources) {
+      let spiderSuccess = false;
+      let spiderErrorMessage: string | undefined;
       try {
-        const raw = await readFile(source.path, "utf8");
-        const rows = JSON.parse(raw) as Array<Record<string, unknown>>;
-        if (!Array.isArray(rows)) {
-          continue;
-        }
-        for (const row of rows) {
-          merged.push({
-            ...row,
-            bot: typeof row.bot === "string" ? row.bot : source.bot,
-            runId: typeof row.runId === "string" ? row.runId : source.runId,
-          });
-        }
-      } catch {
-        continue;
+        const summary = await runSingleConfig(config, dispatcher);
+        spiderSuccess = isSummarySuccessful(summary);
+        processSuccess = spiderSuccess;
+      } catch (error) {
+        spiderErrorMessage = toSpanishErrorMessage(error);
+        processErrorMessage = spiderErrorMessage;
+        process.stderr.write(`${JSON.stringify(toFatalErrorPayload(error, "main", {
+          runId: config.runId,
+          bot: config.bot,
+        }))}\n`);
+        process.exitCode = 1;
+      } finally {
+        const spiderFinishedAtMs = Date.now();
+        processLogger.info("Fin de arana", {
+          accion: "fin_arana",
+          bot: config.bot,
+          busqueda: config.searchTerm,
+          runId: config.runId,
+          success: spiderSuccess,
+          errorMessage: spiderErrorMessage,
+          ...buildTimingMeta(spiderStartedAtMs, spiderStartedAt, spiderFinishedAtMs),
+        });
+      }
+      return;
+    }
+
+    const results: Array<{ id: string; bot: string; success: boolean; error?: string }> = [];
+    const runResultSources: Array<{ path: string; bot: string; runId: string }> = [];
+    for (const job of jobs) {
+      const spiderStartedAtMs = Date.now();
+      const spiderStartedAt = new Date(spiderStartedAtMs).toISOString();
+      processLogger.info("Inicio de arana", {
+        accion: "inicio_arana",
+        jobId: job.id,
+        bot: job.bot,
+        busqueda: job.searchTerm,
+        startedAt: spiderStartedAt,
+      });
+      let spiderSuccess = false;
+      let spiderErrorMessage: string | undefined;
+      let spiderRunId: string | undefined;
+      try {
+        const config = await buildConfigFromArgs(
+          args,
+          {
+            bot: job.bot,
+            searchTerm: job.searchTerm,
+            maxPages: job.maxPages,
+            maxRecords: job.maxRecords,
+            runId: generateRunId(),
+          },
+          runtimeConfig.defaults,
+        );
+        spiderRunId = config.runId;
+        const summary = await runSingleConfig(config, dispatcher);
+        runResultSources.push({
+          path: join(config.resultsDir, config.resultFormat === "json" ? "records.json" : "records.csv"),
+          bot: config.bot,
+          runId: config.runId,
+        });
+        spiderSuccess = isSummarySuccessful(summary);
+        spiderErrorMessage = spiderSuccess ? undefined : buildUnsuccessfulSummaryMessage(summary);
+        results.push({
+          id: job.id,
+          bot: job.bot,
+          success: spiderSuccess,
+          error: spiderErrorMessage,
+        });
+      } catch (error) {
+        spiderErrorMessage = toSpanishErrorMessage(error);
+        results.push({
+          id: job.id,
+          bot: job.bot,
+          success: false,
+          error: spiderErrorMessage,
+        });
+      } finally {
+        const spiderFinishedAtMs = Date.now();
+        processLogger.info("Fin de arana", {
+          accion: "fin_arana",
+          jobId: job.id,
+          bot: job.bot,
+          busqueda: job.searchTerm,
+          runId: spiderRunId,
+          success: spiderSuccess,
+          errorMessage: spiderErrorMessage,
+          ...buildTimingMeta(spiderStartedAtMs, spiderStartedAt, spiderFinishedAtMs),
+        });
       }
     }
 
-    const ordered = merged.sort(compareGlobalRows);
-    const targetPath = join(runsRootOrDir, "result-global.json");
-    await writeFile(targetPath, `${JSON.stringify(ordered, null, 2)}\n`, "utf8");
-    return targetPath;
-  }
-
-  let header: string | undefined;
-  const bodyRows: string[] = [];
-  for (const source of sources) {
-    try {
-      const raw = await readFile(source.path, "utf8");
-      const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
-      if (lines.length === 0) {
-        continue;
-      }
-      if (!header) {
-        header = lines[0];
-      }
-      bodyRows.push(...lines.slice(1));
-    } catch {
-      continue;
+    if (runResultSources.length > 0) {
+      await writeGlobalConsolidatedResults(runsRoot, runResultSources);
     }
-  }
 
-  if (!header) {
-    return undefined;
+    process.stdout.write(`${JSON.stringify({ type: "bot-queue-results", results }, null, 2)}\n`);
+    processSuccess = !results.some((result) => !result.success);
+    if (!processSuccess) {
+      processErrorMessage = "Una o mas aranas terminaron con error.";
+      process.exitCode = 1;
+    }
+  } finally {
+    const processFinishedAtMs = Date.now();
+    processLogger.info("Fin de proceso total", {
+      accion: "fin_proceso_total",
+      success: processSuccess,
+      errorMessage: processErrorMessage,
+      ...buildTimingMeta(processStartedAtMs, processStartedAt, processFinishedAtMs),
+    });
   }
-
-  const targetPath = join(runsRootOrDir, "result-global.csv");
-  await writeFile(targetPath, `${[header, ...bodyRows].join("\n")}\n`, "utf8");
-  return targetPath;
 }
 
-async function buildConfigFromArgs(
-  args: Map<string, string | boolean>,
-  overrides?: Partial<{ bot: string; searchTerm: string; maxPages: number; maxRecords: number; runId: string }>,
-  defaults?: RuntimeDefaults,
-): Promise<ScraperConfig> {
-  const bot = sanitizeBotName(overrides?.bot ?? (args.get("bot") as string | undefined) ?? "default");
-  const runsDir = (args.get("runs-dir") as string | undefined) ?? join(process.cwd(), "runs");
-  const latestPath = join(runsDir, bot, "latest.json");
-  const shouldReuseLatest = Boolean(args.get("resume") || args.get("failed-only"));
-  const explicitRunId = overrides?.runId ?? ((args.get("run-id") as string | undefined) ?? undefined);
-  const latest = shouldReuseLatest ? await readJson<LatestPointer>(latestPath) : undefined;
-  if ((args.get("resume") || args.get("failed-only")) && !explicitRunId && !latest?.runId) {
-    throw new Error(`No latest run found for bot '${bot}'. Provide --run-id or run a fresh scrape first.`);
-  }
-  const runId = explicitRunId ?? latest?.runId ?? generateRunId();
-
-  const runRoot = join(runsDir, bot, runId);
-  const dataDir = (args.get("data-dir") as string | undefined) ?? runRoot;
-  const outputDir = (args.get("output-dir") as string | undefined) ?? join(runRoot, "artifacts", "pdfs");
-  const resultsDir = join(runRoot, "results");
-  const bulkOutputDir = join(runRoot, "artifacts", "bulk");
-  const debugCaptureDir = join(runRoot, "debug", "http-captures");
-  const logFilePath = (args.get("log-file") as string | undefined) ?? join(runRoot, "logs.jsonl");
-  const baseUrl =
-    (args.get("base-url") as string) ??
-    "https://jurisprudencia.pj.gob.pe/jurisprudenciaweb";
-  const searchTerm = overrides?.searchTerm ?? (args.get("search") as string) ?? "civil";
-  const sessionKey = buildSessionKey(baseUrl, bot, searchTerm);
-
-  await ensureDir(join(runsDir, bot));
-  await writeJson(latestPath, { runId, updatedAt: new Date().toISOString() } as LatestPointer);
-
-  const resultFormat = resolveResultFormat(args.get("result-format"), defaults?.resultFormat);
-
+function buildTimingMeta(startedAtMs: number, startedAt: string, endedAtMs: number): {
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  durationSec: number;
+} {
+  const durationMs = Math.max(0, endedAtMs - startedAtMs);
   return {
-    baseUrl,
-    searchTerm,
-    bot,
-    runId,
-    runsDir,
-    outputDir,
-    resultsDir,
-    bulkOutputDir,
-    dataDir,
-    resume: Boolean(args.get("resume")),
-    failedOnly: Boolean(args.get("failed-only")),
-    maxRecords: overrides?.maxRecords ?? (args.get("max-records") ? Number(args.get("max-records")) : undefined),
-    maxPages: overrides?.maxPages ?? (args.get("max-pages") ? Number(args.get("max-pages")) : undefined),
-    requestDelayMs: resolveNumberArg(args, "request-delay-ms", defaults?.requestDelayMs, 0),
-    requestJitterMs: resolveNumberArg(args, "request-jitter-ms", defaults?.requestJitterMs, 0),
-    logLevel: normalizeLogLevel((args.get("log-level") as string | undefined) ?? defaults?.logLevel),
-    logFormat: normalizeLogFormat((args.get("log-format") as string | undefined) ?? defaults?.logFormat),
-    logFilePath,
-    downloadMode: (((args.get("download-mode") as string | undefined) ?? defaults?.downloadMode ?? "individual")) as
-      | "individual"
-      | "bulk"
-      | "both",
-    resultFormat,
-    unzip: resolveBooleanArg(args, "unzip", defaults?.unzip, false),
-    sessionKey,
-    maxConsecutiveDownloadFailures: resolveNumberArg(
-      args,
-      "max-consecutive-download-failures",
-      defaults?.maxConsecutiveDownloadFailures,
-      0,
-    ),
-    debugCaptureDir,
+    startedAt,
+    endedAt: new Date(endedAtMs).toISOString(),
+    durationMs,
+    durationSec: Number((durationMs / 1000).toFixed(3)),
   };
 }
 
-async function runSingleConfig(config: ScraperConfig, dispatcher: NetworkDispatcher): Promise<ScrapeSummary> {
+async function runSingleConfig(config: ScraperConfig, dispatcher: ReturnType<typeof createDispatcher>): Promise<ScrapeSummary> {
   const runStore = new RunStore(buildRunStorePaths(config.dataDir));
   await runStore.initialize();
   const manifest = buildInitialManifest(config);
@@ -397,367 +273,15 @@ async function runSingleConfig(config: ScraperConfig, dispatcher: NetworkDispatc
   }
 }
 
-function createDispatcher(args: Map<string, string | boolean>, defaults?: RuntimeDefaults): NetworkDispatcher {
-  return new NetworkDispatcher({
-    requestsPerSecond: resolveNumberArg(args, "network-rps", defaults?.networkRps, 1),
-    cooldownMs: resolveNumberArg(args, "network-cooldown-ms", defaults?.networkCooldownMs, 10_000),
-    cooldownWindowMs: resolveNumberArg(args, "network-cooldown-window-ms", defaults?.networkCooldownWindowMs, 30_000),
-    cooldownThreshold: resolveNumberArg(args, "network-cooldown-threshold", defaults?.networkCooldownThreshold, 3),
-    maxCooldownMs: resolveNumberArg(args, "network-max-cooldown-ms", defaults?.networkMaxCooldownMs, 60_000),
-    jitterRatio: resolveNumberArg(args, "network-jitter-ratio", defaults?.networkJitterRatio, 0.2),
-  });
-}
-
-function parseBotJobs(value: string | undefined, defaults?: BotJob[]): BotJob[] {
-  if (!value) {
-    return defaults ?? [];
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value) as unknown;
-  } catch {
-    parsed = parseLooseBotJobs(value);
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error("--bot-jobs must be a JSON array");
-  }
-  return parsed.map((item, index) => {
-    if (typeof item !== "object" || !item) {
-      throw new Error(`Invalid bot job at index ${index}`);
-    }
-    const job = item as {
-      id?: unknown;
-      bot?: unknown;
-      searchTerm?: unknown;
-      maxPages?: unknown;
-      maxRecords?: unknown;
-    };
-    if (typeof job.bot !== "string" || typeof job.searchTerm !== "string") {
-      throw new Error(`Bot job at index ${index} requires string bot and searchTerm`);
-    }
-    return {
-      id: typeof job.id === "string" ? job.id : `job-${index + 1}`,
-      bot: job.bot,
-      searchTerm: job.searchTerm,
-      maxPages: typeof job.maxPages === "number" ? job.maxPages : undefined,
-      maxRecords: typeof job.maxRecords === "number" ? job.maxRecords : undefined,
-    };
-  });
-}
-
-function resolveNumberArg(
-  args: Map<string, string | boolean>,
-  key: string,
-  defaultValue: number | undefined,
-  fallback: number,
-): number {
-  const fromCli = args.get(key);
-  if (typeof fromCli === "string") {
-    return Number(fromCli);
-  }
-  if (typeof defaultValue === "number") {
-    return defaultValue;
-  }
-  return fallback;
-}
-
-function resolveBooleanArg(
-  args: Map<string, string | boolean>,
-  key: string,
-  defaultValue: boolean | undefined,
-  fallback: boolean,
-): boolean {
-  const fromCli = args.get(key);
-  if (typeof fromCli === "boolean") {
-    return fromCli;
-  }
-  if (typeof fromCli === "string") {
-    const normalized = fromCli.trim().toLowerCase();
-    if (["1", "true", "yes", "on"].includes(normalized)) {
-      return true;
-    }
-    if (["0", "false", "no", "off"].includes(normalized)) {
-      return false;
-    }
-    return Boolean(normalized);
-  }
-  if (typeof defaultValue === "boolean") {
-    return defaultValue;
-  }
-  return fallback;
-}
-
-function resolveResultFormat(
-  fromCli: string | boolean | undefined,
-  fromDefault: "csv" | "json" | undefined,
-): "csv" | "json" {
-  const raw = fromCli ?? fromDefault ?? "csv";
-  if (typeof raw !== "string") {
-    throw new Error("Unsupported result format. Use --result-format csv|json.");
-  }
-  const normalized = raw.toLowerCase();
-  if (normalized !== "json" && normalized !== "csv") {
-    throw new Error(`Unsupported result format '${normalized}'. Use --result-format csv|json.`);
-  }
-  return normalized;
-}
-
-export function isSummarySuccessful(summary: ScrapeSummary): boolean {
-  if (summary.processed === 0) {
-    return false;
-  }
-  return summary.failed === 0;
-}
-
-function buildUnsuccessfulSummaryMessage(summary: ScrapeSummary): string {
-  if (summary.processed === 0) {
-    return "La corrida termino sin registros procesados (processed=0).";
-  }
-  if (summary.failed > 0) {
-    return `La corrida termino con ${summary.failed} descargas fallidas (processed=${summary.processed}, downloaded=${summary.downloaded}).`;
-  }
-  return `La corrida termino en estado no exitoso (processed=${summary.processed}, downloaded=${summary.downloaded}, failed=${summary.failed}).`;
-}
-
-function compareGlobalRows(a: Record<string, unknown>, b: Record<string, unknown>): number {
-  const botOrder = String(a.bot ?? "").localeCompare(String(b.bot ?? ""));
-  if (botOrder !== 0) {
-    return botOrder;
-  }
-
-  const pageA = Number(a.sourcePage ?? 0);
-  const pageB = Number(b.sourcePage ?? 0);
-  if (pageA !== pageB) {
-    return pageA - pageB;
-  }
-
-  const titleOrder = String(a.title ?? "").localeCompare(String(b.title ?? ""));
-  if (titleOrder !== 0) {
-    return titleOrder;
-  }
-
-  return String(a.id ?? "").localeCompare(String(b.id ?? ""));
-}
-
-export async function loadRuntimeConfig(configPath: string | undefined): Promise<RuntimeConfigFile> {
-  const resolvedPath = resolveConfigPath(configPath);
-  if (!resolvedPath) {
-    return {};
-  }
-
-  let parsed: unknown;
-  try {
-    const content = await readFile(resolvedPath, "utf8");
-    parsed = JSON.parse(content) as unknown;
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid config file '${resolvedPath}': ${reason}`);
-  }
-
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error(`Invalid config file '${resolvedPath}': expected a JSON object`);
-  }
-
-  const config = parsed as RuntimeConfigFile;
-  const defaults = config.defaults;
-  if (defaults && typeof defaults !== "object") {
-    throw new Error(`Invalid config file '${resolvedPath}': defaults must be an object`);
-  }
-  if (defaults?.resultFormat !== undefined && typeof defaults.resultFormat !== "string") {
-    throw new Error(`Invalid config file '${resolvedPath}': defaults.resultFormat must be a string`);
-  }
-  if (config.botJobs && !Array.isArray(config.botJobs)) {
-    throw new Error(`Invalid config file '${resolvedPath}': botJobs must be an array`);
-  }
-  if (config.botGroups && !Array.isArray(config.botGroups)) {
-    throw new Error(`Invalid config file '${resolvedPath}': botGroups must be an array`);
-  }
-  if (config.botJobs) {
-    config.botJobs.forEach((job, index) => {
-      if (typeof job !== "object" || !job) {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}] must be an object`);
-      }
-      if (typeof job.bot !== "string" || typeof job.searchTerm !== "string") {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}] requires string bot and searchTerm`);
-      }
-      if (job.id !== undefined && typeof job.id !== "string") {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}].id must be a string`);
-      }
-      if (job.maxPages !== undefined && typeof job.maxPages !== "number") {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}].maxPages must be a number`);
-      }
-      if (job.maxRecords !== undefined && typeof job.maxRecords !== "number") {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}].maxRecords must be a number`);
-      }
-    });
-  }
-  if (config.botGroups) {
-    config.botGroups.forEach((group, index) => {
-      if (typeof group !== "object" || !group) {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}] must be an object`);
-      }
-      if (typeof group.bot !== "string") {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].bot must be a string`);
-      }
-      if (!Array.isArray(group.searchTerms) || group.searchTerms.length === 0) {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms must be a non-empty array`);
-      }
-      if (group.maxPages !== undefined && typeof group.maxPages !== "number") {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].maxPages must be a number`);
-      }
-      if (group.maxRecords !== undefined && typeof group.maxRecords !== "number") {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].maxRecords must be a number`);
-      }
-      group.searchTerms.forEach((entry, entryIndex) => {
-        if (typeof entry === "string") {
-          if (!entry.trim()) {
-            throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}] cannot be empty`);
-          }
-          return;
-        }
-        if (!entry || typeof entry !== "object") {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}] must be a string or object`);
-        }
-        if (typeof entry.term !== "string" || !entry.term.trim()) {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}].term must be a non-empty string`);
-        }
-        if (entry.id !== undefined && typeof entry.id !== "string") {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}].id must be a string`);
-        }
-        if (entry.maxPages !== undefined && typeof entry.maxPages !== "number") {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}].maxPages must be a number`);
-        }
-        if (entry.maxRecords !== undefined && typeof entry.maxRecords !== "number") {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}].maxRecords must be a number`);
-        }
-      });
-    });
-  }
-
-  return config;
-}
-
-export function expandConfigBotJobs(config: RuntimeConfigFile): BotJob[] {
-  const explicit = config.botJobs ?? [];
-  const fromGroups = (config.botGroups ?? []).flatMap((group) => {
-    const bot = group.bot;
-    return group.searchTerms.map((entry, index) => {
-      if (typeof entry === "string") {
-        return {
-          id: `${bot}-${index + 1}`,
-          bot,
-          searchTerm: entry,
-          maxPages: group.maxPages,
-          maxRecords: group.maxRecords,
-        } satisfies BotJob;
-      }
-
-      return {
-        id: entry.id ?? `${bot}-${index + 1}`,
-        bot,
-        searchTerm: entry.term,
-        maxPages: entry.maxPages ?? group.maxPages,
-        maxRecords: entry.maxRecords ?? group.maxRecords,
-      } satisfies BotJob;
-    });
-  });
-
-  return [...explicit, ...fromGroups];
-}
-
-function resolveConfigPath(configPath: string | undefined): string | undefined {
-  const input = configPath?.trim();
-  if (!input) {
-    return undefined;
-  }
-  return isAbsolute(input) ? input : resolve(process.cwd(), input);
-}
-
-function parseLooseBotJobs(input: string): unknown {
-  const trimmed = input.trim();
-  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
-    throw new Error("--bot-jobs must be a JSON array");
-  }
-  const body = trimmed.slice(1, -1).trim();
-  if (!body) {
-    return [];
-  }
-
-  const chunks = body
-    .split(/\}\s*,\s*\{/)
-    .map((part, index, all) => {
-      if (index === 0) {
-        return part.replace(/^\s*\{/, "");
-      }
-      if (index === all.length - 1) {
-        return part.replace(/\}\s*$/, "");
-      }
-      return part;
-    })
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
-
-  return chunks.map((chunk) => {
-    const obj: Record<string, unknown> = {};
-    const pairs = chunk.split(",");
-    for (const pairRaw of pairs) {
-      const pair = pairRaw.trim();
-      if (!pair) {
-        continue;
-      }
-      const colonIndex = pair.indexOf(":");
-      if (colonIndex <= 0) {
-        continue;
-      }
-      const key = pair.slice(0, colonIndex).trim().replace(/^['"]|['"]$/g, "");
-      const rawValue = pair.slice(colonIndex + 1).trim().replace(/^['"]|['"]$/g, "");
-      if (/^-?\d+(\.\d+)?$/.test(rawValue)) {
-        obj[key] = Number(rawValue);
-      } else if (rawValue.toLowerCase() === "true" || rawValue.toLowerCase() === "false") {
-        obj[key] = rawValue.toLowerCase() === "true";
-      } else {
-        obj[key] = rawValue;
-      }
-    }
-    return obj;
-  });
-}
-
-function buildSessionKey(baseUrl: string, bot: string, searchTerm: string): string {
-  const normalized = `${baseUrl.toLowerCase()}|${bot.toLowerCase()}|${searchTerm.trim().toLowerCase()}`;
-  return `${bot}:${stableHash(normalized).slice(0, 12)}`;
-}
-
-export function sanitizeBotName(input: string): string {
-  const normalized = input
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9-_]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-  return normalized || "default";
-}
-
-export function generateRunId(): string {
-  const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  return `${ts}_${randomBytes(3).toString("hex")}`;
-}
-
-export function toFatalErrorPayload(
-  error: unknown,
-  operation: string,
-  context?: { runId?: string; bot?: string },
-): FatalErrorPayload {
-  return {
-    type: "fatal",
-    stage: "main",
-    operation,
-    errorName: error instanceof Error ? error.name : "Error",
-    errorMessage: toSpanishErrorMessage(error),
-    runId: context?.runId,
-    bot: context?.bot,
-  };
-}
+export {
+  parseArgs,
+  buildConfig,
+  loadRuntimeConfig,
+  expandConfigBotJobs,
+  isSummarySuccessful,
+  writeGlobalConsolidatedResults,
+  toFatalErrorPayload,
+};
 
 if (require.main === module) {
   void main().catch((error) => {

@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { extractPortalState, extractViewStateFromPartial, parsePartialResponse, PortalClient } from "../src/portalClient";
+import { extractPortalState, extractViewStateFromPartial, parsePartialResponse, PortalClient } from "../src/portal/client";
 
 const fixturesDir = join(__dirname, "fixtures");
 

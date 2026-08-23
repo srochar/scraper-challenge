@@ -1,6 +1,6 @@
 import { dirname, join } from "path";
-import { FailedRecord, RunErrorEvent, ScrapeSummary, ScraperConfig } from "./types";
-import { appendJsonLine, ensureDir, readJson, readJsonLines, writeJson } from "./utils/fs";
+import { FailedRecord, RunErrorEvent, ScrapeSummary, ScraperConfig } from "../types";
+import { appendJsonLine, ensureDir, readJson, readJsonLines, writeJson } from "../utils/fs";
 
 export interface ProgressState {
   page: number;

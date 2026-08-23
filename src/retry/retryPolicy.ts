@@ -1,4 +1,4 @@
-import { RetryConfig, RetryDependencies } from "./types";
+import { RetryConfig, RetryDependencies } from "../types";
 
 export interface RetryOutcome<T> {
   value?: T;

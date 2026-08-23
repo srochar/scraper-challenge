@@ -5,9 +5,13 @@ import { wrapper } from "axios-cookiejar-support";
 import { CookieJar } from "tough-cookie";
 import { join } from "path";
 import { writeFile } from "fs/promises";
-import { Logger } from "./logger";
-import { PartialUpdateMap, PortalState } from "./types";
-import { ensureDir } from "./utils/fs";
+import { Logger } from "../logging/logger";
+import { PartialUpdateMap, PortalState } from "../types";
+import { ensureDir } from "../utils/fs";
+import { buildInicioSearchPayload } from "../pages/inicioPage";
+import { buildBulkDownloadPanelPayload, buildBulkSelectionPayload, buildBulkZipPayload, inferPageFromBulkFields } from "../pages/bulkPage";
+import { buildPagePayload, buildSearchPayload } from "../pages/resultadoPage";
+import { PortalSessionState } from "./sessionState";
 
 export interface PortalClientOptions {
   baseUrl: string;
@@ -32,6 +36,7 @@ export class PortalClient {
   private readonly logger?: Logger;
   private readonly debugCaptureDir?: string;
   private state?: PortalState;
+  private readonly session = new PortalSessionState();
   private readonly browserUserAgent =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
   private debugCaptureSeq = 0;
@@ -62,7 +67,7 @@ export class PortalClient {
   }
 
   getState(): PortalState | undefined {
-    return this.state;
+    return this.session.get();
   }
 
   async initialize(path = ""): Promise<PortalResponse> {
@@ -73,7 +78,7 @@ export class PortalClient {
         this.logger?.debug("Initializing portal state", { target });
         const response = await this.axios.get<string>(this.buildUrl(target));
         const state = extractPortalState(response.data);
-        this.state = state;
+        this.setSessionState(state);
         this.logger?.info("Portal state initialized", {
           formId: state.formId,
           viewStateLength: state.viewState.length,
@@ -98,11 +103,9 @@ export class PortalClient {
   }
 
   async search(term: string): Promise<PortalResponse> {
-    if (!this.state) {
-      throw new Error("Portal client is not initialized");
-    }
+    const currentState = this.requireSessionState();
 
-    const payload = buildSearchPayload(this.state, term);
+    const payload = buildSearchPayload(currentState, term);
     this.logger?.debug("Submitting search payload", {
       searchTerm: term,
       payloadSize: payload.toString().length,
@@ -137,7 +140,7 @@ export class PortalClient {
         },
       });
       const refreshedState = extractPortalState(refreshed.data);
-      this.state = refreshedState;
+      this.setSessionState(refreshedState);
       return {
         raw: refreshed.data,
         state: refreshedState,
@@ -146,13 +149,12 @@ export class PortalClient {
     }
 
     const updates = parsePartialResponse(response.data);
-    const nextState = extractViewStateFromPartial(response.data) ?? this.state.viewState;
-    const bulkSubmitField = inferBulkSubmitFieldFromUpdates(updates, this.state.formId) ?? this.state.bulkSubmitField;
-    this.state = {
-      ...this.state,
+    const nextState = extractViewStateFromPartial(response.data) ?? currentState.viewState;
+    const bulkSubmitField = inferBulkSubmitFieldFromUpdates(updates, currentState.formId) ?? currentState.bulkSubmitField;
+    const updatedState = this.mergeSessionState({
       viewState: nextState,
       bulkSubmitField,
-    };
+    });
     this.logger?.info("Search response received", {
       accion: "buscar",
       updateCount: Object.keys(updates).length,
@@ -161,7 +163,7 @@ export class PortalClient {
 
     return {
       raw: response.data,
-      state: this.state,
+      state: updatedState,
       updates,
       isPartial: true,
     };
@@ -171,31 +173,7 @@ export class PortalClient {
     this.logger?.debug("Submitting inicio search form", { term });
     const inicioHtml = await this.axios.get<string>(this.buildUrl(this.initPath));
     const inicioState = extractPortalState(inicioHtml.data);
-
-    const payload = new URLSearchParams();
-    payload.set(inicioState.formId, inicioState.formId);
-    payload.set("javax.faces.ViewState", inicioState.viewState);
-    payload.set(`${inicioState.formId}:tabpanel-value`, "general");
-    payload.set(`${inicioState.formId}:txtBusqueda`, `${term} `);
-    payload.set(`${inicioState.formId}:buCorte`, "1");
-    payload.set(`${inicioState.formId}:buDistrito`, "0");
-    payload.set(`${inicioState.formId}:buEspecialidad`, "0");
-    payload.set(`${inicioState.formId}:buSala`, "0");
-    payload.set(`${inicioState.formId}:buPretensionDelitoSupValue`, "");
-    payload.set(`${inicioState.formId}:buPretensionDelitoSupInput`, "");
-    payload.set(`${inicioState.formId}:buPretensionValue`, "");
-    payload.set(`${inicioState.formId}:buPretensionInput`, "");
-    payload.set(`${inicioState.formId}:buPalabraClaveValue`, "");
-    payload.set(`${inicioState.formId}:buPalabraClaveInput`, "");
-    payload.set(`${inicioState.formId}:buNroExpediente`, "Ingrese Nro de Expediente XXXXXX");
-    payload.set(`${inicioState.formId}:buAnio`, "");
-    payload.set(`${inicioState.formId}:j_idt31`, `${inicioState.formId}:j_idt31`);
-    payload.set("forward", "buscar");
-    payload.set("busqueda", "especializada");
-    payload.set(`${inicioState.formId}:j_idt34`, "21");
-    payload.set(`${inicioState.formId}:j_idt35`, "DESC");
-    payload.set(`${inicioState.formId}:j_idt36`, "Principal");
-    payload.set(`${inicioState.formId}:j_idt37`, "1");
+    const payload = buildInicioSearchPayload(inicioState, term);
 
     await this.axios.post(this.buildUrl(this.initPath), payload.toString(), {
       headers: {
@@ -216,7 +194,7 @@ export class PortalClient {
 
     const resultPage = await this.axios.get<string>(this.buildUrl(this.resultPath));
     const resultState = extractPortalState(resultPage.data);
-    this.state = resultState;
+    this.setSessionState(resultState);
     this.logger?.info("Search form submitted and result page loaded", {
       accion: "buscar",
       viewStateLength: resultState.viewState.length,
@@ -231,11 +209,9 @@ export class PortalClient {
   }
 
   async gotoPage(page: number, term: string): Promise<PortalResponse> {
-    if (!this.state) {
-      throw new Error("Portal client is not initialized");
-    }
+    const currentState = this.requireSessionState();
 
-    const payload = buildPagePayload(this.state, term, page);
+    const payload = buildPagePayload(currentState, term, page);
     this.logger?.debug("Submitting page payload", {
       page,
       searchTerm: term,
@@ -267,7 +243,7 @@ export class PortalClient {
         },
       });
       const refreshedState = extractPortalState(refreshed.data);
-      this.state = refreshedState;
+      this.setSessionState(refreshedState);
       return {
         raw: refreshed.data,
         state: refreshedState,
@@ -276,13 +252,12 @@ export class PortalClient {
     }
 
     const updates = parsePartialResponse(response.data);
-    const nextState = extractViewStateFromPartial(response.data) ?? this.state.viewState;
-    const bulkSubmitField = inferBulkSubmitFieldFromUpdates(updates, this.state.formId) ?? this.state.bulkSubmitField;
-    this.state = {
-      ...this.state,
+    const nextState = extractViewStateFromPartial(response.data) ?? currentState.viewState;
+    const bulkSubmitField = inferBulkSubmitFieldFromUpdates(updates, currentState.formId) ?? currentState.bulkSubmitField;
+    const updatedState = this.mergeSessionState({
       viewState: nextState,
       bulkSubmitField,
-    };
+    });
     this.logger?.info("Pagination response received", {
       accion: "paginar",
       page,
@@ -292,14 +267,14 @@ export class PortalClient {
 
     return {
       raw: response.data,
-      state: this.state,
+      state: updatedState,
       updates,
       isPartial: true,
     };
   }
 
   getPortalState(): PortalState | undefined {
-    return this.state;
+    return this.session.get();
   }
 
   async downloadBulkZip(
@@ -307,10 +282,11 @@ export class PortalClient {
     searchTerm: string,
     pageNumber?: number,
   ): Promise<Buffer | undefined> {
-    if (!this.state?.bulkSubmitField || records.length === 0) {
+    const state = this.currentSessionState();
+    if (!state?.bulkSubmitField || records.length === 0) {
       this.logger?.warn("Bulk ZIP skipped due to missing state/records", {
-        hasState: Boolean(this.state),
-        hasBulkSubmitField: Boolean(this.state?.bulkSubmitField),
+        hasState: Boolean(state),
+        hasBulkSubmitField: Boolean(state?.bulkSubmitField),
         records: records.length,
       });
       return undefined;
@@ -340,32 +316,13 @@ export class PortalClient {
     captureStep: string,
     submitFieldOverride?: string,
   ): Promise<{ buffer?: Buffer; responseBody: Buffer }> {
-    if (!this.state) {
+    const state = this.currentSessionState();
+    if (!state) {
       return { responseBody: Buffer.alloc(0) };
     }
 
-    const payload = new URLSearchParams();
-    payload.set(this.state.formId, this.state.formId);
-    payload.set("javax.faces.ViewState", this.state.viewState);
-    addBulkFilterDefaults(payload, this.state.formDefaults, this.state.formId);
-    payload.set(`${this.state.formId}:txtBusqueda`, searchTerm);
-
-    for (const record of records) {
-      if (record.bulkFieldName) {
-        payload.set(record.bulkFieldName, "on");
-      }
-    }
-
-    if (spinnerPage) {
-      payload.set(`${this.state.formId}:spinner`, String(spinnerPage));
-      payload.set(`${this.state.formId}:spinner2`, String(spinnerPage));
-      payload.set(`${this.state.formId}:j_idt419`, "on");
-      payload.set(`${this.state.formId}:j_idt525`, "on");
-      payload.set(`${this.state.formId}:j_idt533`, "on");
-    }
-
-    const submitField = submitFieldOverride ?? this.state.bulkSubmitField ?? `${this.state.formId}:j_idt422`;
-    payload.set(submitField, submitField);
+    const submitField = submitFieldOverride ?? state.bulkSubmitField ?? `${state.formId}:j_idt422`;
+    const payload = buildBulkZipPayload(state, records, searchTerm, submitField, spinnerPage);
     this.logger?.info("Submitting bulk ZIP download", {
       selected: records.filter((record) => Boolean(record.bulkFieldName)).length,
       submitField,
@@ -429,7 +386,8 @@ export class PortalClient {
     spinnerPage: number | undefined,
     responseBody: Buffer,
   ): Promise<Buffer | undefined> {
-    if (!this.state || responseBody.length === 0) {
+    const currentState = this.currentSessionState();
+    if (!currentState || responseBody.length === 0) {
       return undefined;
     }
 
@@ -443,26 +401,26 @@ export class PortalClient {
 
     this.logger?.info("Retrying bulk ZIP after selection mismatch warning", {
       spinnerPage,
-      submitField: this.state.bulkSubmitField,
+      submitField: currentState.bulkSubmitField,
     });
 
     try {
       const refreshed = extractPortalState(html);
-      this.state = {
-        ...this.state,
+      this.mergeSessionState({
         formDefaults: refreshed.formDefaults,
         viewState: refreshed.viewState,
-      };
+      });
     } catch (error) {
       this.logger?.debug("Unable to refresh state from bulk mismatch response", {
         error: error instanceof Error ? error.message : String(error),
       });
     }
 
-    const triggerFields = inferBulkTriggerFieldsFromContent(html, this.state.formId);
+    const nextState = this.requireSessionState();
+    const triggerFields = inferBulkTriggerFieldsFromContent(html, nextState.formId);
     const candidates = triggerFields.length > 0
       ? triggerFields
-      : [`${this.state.formId}:j_idt429`, `${this.state.formId}:j_idt535`, `${this.state.formId}:j_idt422`];
+      : [`${nextState.formId}:j_idt429`, `${nextState.formId}:j_idt535`, `${nextState.formId}:j_idt422`];
 
     for (const triggerField of candidates) {
       const prepared = await this.prepareBulkDownloadPanel(triggerField, searchTerm, spinnerPage);
@@ -472,11 +430,11 @@ export class PortalClient {
     }
 
     const submitCandidates = Array.from(new Set([
-      this.state.bulkSubmitField,
+      nextState.bulkSubmitField,
       ...this.bulkSubmitCandidates,
-      ...inferBulkSubmitFieldsFromContent(html, this.state.formId),
-      `${this.state.formId}:j_idt422`,
-      `${this.state.formId}:j_idt528`,
+      ...inferBulkSubmitFieldsFromContent(html, nextState.formId),
+      `${nextState.formId}:j_idt422`,
+      `${nextState.formId}:j_idt528`,
     ].filter((value): value is string => Boolean(value))));
 
     for (let index = 0; index < submitCandidates.length; index += 1) {
@@ -492,31 +450,11 @@ export class PortalClient {
   }
 
   private async prepareBulkSelection(searchTerm: string, spinnerPage?: number): Promise<void> {
-    if (!this.state) {
+    const state = this.currentSessionState();
+    if (!state) {
       return;
     }
-
-    const sourceField = `${this.state.formId}:j_idt419`;
-    const ajaxPayload = new URLSearchParams();
-    ajaxPayload.set(this.state.formId, this.state.formId);
-    ajaxPayload.set("javax.faces.ViewState", this.state.viewState);
-    addDefaults(ajaxPayload, this.state.formDefaults);
-    ajaxPayload.set(`${this.state.formId}:txtBusqueda`, searchTerm);
-    ajaxPayload.set(sourceField, "on");
-    ajaxPayload.set(`${this.state.formId}:j_idt434`, "on");
-    ajaxPayload.set(`${this.state.formId}:j_idt540`, "on");
-    if (spinnerPage) {
-      ajaxPayload.set(`${this.state.formId}:spinner`, String(spinnerPage));
-      ajaxPayload.set(`${this.state.formId}:spinner2`, String(spinnerPage));
-    }
-    ajaxPayload.set("javax.faces.source", sourceField);
-    ajaxPayload.set("javax.faces.partial.event", "click");
-    ajaxPayload.set("javax.faces.partial.execute", `${sourceField} @component`);
-    ajaxPayload.set("javax.faces.partial.render", "@component");
-    ajaxPayload.set("javax.faces.behavior.event", "click");
-    ajaxPayload.set("org.richfaces.ajax.component", sourceField);
-    ajaxPayload.set("AJAX:EVENTS_COUNT", "1");
-    ajaxPayload.set("javax.faces.partial.ajax", "true");
+    const ajaxPayload = buildBulkSelectionPayload(state, searchTerm, spinnerPage);
 
     try {
       const ajaxResponse = await this.axios.post<string>(this.buildUrl(this.resultPath), ajaxPayload.toString(), {
@@ -542,28 +480,27 @@ export class PortalClient {
       );
 
       const updates = parsePartialResponse(ajaxResponse.data);
-      const nextState = extractViewStateFromPartial(ajaxResponse.data) ?? this.state.viewState;
+      const nextViewState = extractViewStateFromPartial(ajaxResponse.data) ?? state.viewState;
       const updatesBlob = Object.values(updates).join("\n");
-      const inferredSubmitField = inferBulkSubmitFieldFromUpdates(updates, this.state.formId);
-      const bulkSubmitField = inferredSubmitField ?? this.state.bulkSubmitField;
+      const inferredSubmitField = inferBulkSubmitFieldFromUpdates(updates, state.formId);
+      const bulkSubmitField = inferredSubmitField ?? state.bulkSubmitField;
       this.bulkSubmitCandidates = Array.from(new Set([
         bulkSubmitField,
-        ...inferBulkSubmitFieldsFromContent(updatesBlob, this.state.formId),
+        ...inferBulkSubmitFieldsFromContent(updatesBlob, state.formId),
       ].filter((value): value is string => Boolean(value))));
-      this.state = {
-        ...this.state,
-        viewState: nextState,
+      const currentState = this.mergeSessionState({
+        viewState: nextViewState,
         bulkSubmitField,
-      };
+      });
 
       let prepared = false;
       let candidateFields: string[] = [];
-      const shouldPreparePanel = !inferredSubmitField && !hasFieldInContent(updatesBlob, this.state.formId, this.state.bulkSubmitField);
+      const shouldPreparePanel = !inferredSubmitField && !hasFieldInContent(updatesBlob, currentState.formId, currentState.bulkSubmitField);
       if (shouldPreparePanel) {
-        const triggerFields = inferBulkTriggerFieldsFromContent(updatesBlob, this.state.formId);
+        const triggerFields = inferBulkTriggerFieldsFromContent(updatesBlob, currentState.formId);
         candidateFields = triggerFields.length > 0
           ? triggerFields
-          : [`${this.state.formId}:j_idt429`, `${this.state.formId}:j_idt422`];
+          : [`${currentState.formId}:j_idt429`, `${currentState.formId}:j_idt422`];
 
         for (const triggerField of candidateFields) {
           prepared = await this.prepareBulkDownloadPanel(triggerField, searchTerm, spinnerPage);
@@ -595,29 +532,11 @@ export class PortalClient {
     searchTerm: string,
     spinnerPage?: number,
   ): Promise<boolean> {
-    if (!this.state) {
+    const state = this.currentSessionState();
+    if (!state) {
       return false;
     }
-
-    const payload = new URLSearchParams();
-    payload.set(this.state.formId, this.state.formId);
-    payload.set("javax.faces.ViewState", this.state.viewState);
-    addDefaults(payload, this.state.formDefaults);
-    payload.set(`${this.state.formId}:txtBusqueda`, searchTerm);
-    payload.set(triggerField, triggerField);
-    payload.set("incId", "1");
-    if (spinnerPage) {
-      payload.set(`${this.state.formId}:spinner`, String(spinnerPage));
-      payload.set(`${this.state.formId}:spinner2`, String(spinnerPage));
-    }
-    payload.set("javax.faces.source", triggerField);
-    payload.set("javax.faces.partial.event", "click");
-    payload.set("javax.faces.partial.execute", `${triggerField} @component`);
-    payload.set("javax.faces.partial.render", "@component");
-    payload.set("javax.faces.behavior.event", "click");
-    payload.set("org.richfaces.ajax.component", triggerField);
-    payload.set("AJAX:EVENTS_COUNT", "1");
-    payload.set("javax.faces.partial.ajax", "true");
+    const payload = buildBulkDownloadPanelPayload(state, triggerField, searchTerm, spinnerPage);
 
     try {
       const response = await this.axios.post<string>(this.buildUrl(this.resultPath), payload.toString(), {
@@ -643,13 +562,12 @@ export class PortalClient {
       );
 
       const updates = parsePartialResponse(response.data);
-      const nextState = extractViewStateFromPartial(response.data) ?? this.state.viewState;
-      const dynamicSubmit = inferBulkSubmitFieldFromUpdates(updates, this.state.formId) ?? this.state.bulkSubmitField;
-      this.state = {
-        ...this.state,
-        viewState: nextState,
+      const nextViewState = extractViewStateFromPartial(response.data) ?? state.viewState;
+      const dynamicSubmit = inferBulkSubmitFieldFromUpdates(updates, state.formId) ?? state.bulkSubmitField;
+      this.mergeSessionState({
+        viewState: nextViewState,
         bulkSubmitField: dynamicSubmit,
-      };
+      });
 
       this.logger?.debug("Bulk download panel prepared", {
         triggerField,
@@ -728,6 +646,33 @@ export class PortalClient {
     }
   }
 
+  private setSessionState(state: PortalState): PortalState {
+    this.state = state;
+    return this.session.replace(state);
+  }
+
+  private mergeSessionState(patch: Partial<PortalState>): PortalState {
+    const next = this.session.merge(patch);
+    this.state = next;
+    return next;
+  }
+
+  private requireSessionState(): PortalState {
+    const state = this.currentSessionState();
+    if (!state) {
+      throw new Error("Portal client is not initialized");
+    }
+    return state;
+  }
+
+  private currentSessionState(): PortalState | undefined {
+    const state = this.session.get() ?? this.state;
+    if (state && !this.session.get()) {
+      this.session.replace(state);
+    }
+    return state;
+  }
+
 }
 
 function looksLikeHtml(body: Buffer): boolean {
@@ -738,22 +683,6 @@ function looksLikeHtml(body: Buffer): boolean {
 function looksLikeXml(body: Buffer): boolean {
   const probe = body.toString("utf8", 0, Math.min(body.length, 512)).toLowerCase();
   return probe.includes("<?xml") || probe.includes("<partial-response");
-}
-
-function inferPageFromBulkFields(records: Array<{ bulkFieldName?: string }>): number | undefined {
-  const indexes = records
-    .map((record) => {
-      const match = record.bulkFieldName?.match(/:repeat:(\d+):/);
-      return match ? Number(match[1]) : undefined;
-    })
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-
-  if (indexes.length === 0) {
-    return undefined;
-  }
-
-  const smallestIndex = Math.min(...indexes);
-  return Math.floor(smallestIndex / 10) + 1;
 }
 
 
@@ -827,82 +756,6 @@ function escapeCssId(id: string): string {
   return id.replace(/:/g, "\\:");
 }
 
-function buildSearchPayload(state: PortalState, term: string): URLSearchParams {
-  const payload = new URLSearchParams();
-  payload.set(state.formId, state.formId);
-  addDefaults(payload, state.formDefaults);
-  payload.set(`${state.formId}:txtBusqueda`, term);
-  payload.set("javax.faces.ViewState", state.viewState);
-  payload.set("javax.faces.source", `${state.formId}:data1`);
-  payload.set("javax.faces.partial.event", "rich:datascroller:onscroll");
-  payload.set("javax.faces.partial.execute", `${state.formId}:data1 @component`);
-  payload.set("javax.faces.partial.render", "@component");
-  payload.set(`${state.formId}:data1:page`, "1");
-  payload.set("org.richfaces.ajax.component", `${state.formId}:data1`);
-  payload.set(`${state.formId}:data1`, `${state.formId}:data1`);
-  payload.set("AJAX:EVENTS_COUNT", "1");
-  payload.set("javax.faces.partial.ajax", "true");
-  return payload;
-}
-
-function buildPagePayload(state: PortalState, term: string, page: number): URLSearchParams {
-  const payload = new URLSearchParams();
-  payload.set(state.formId, state.formId);
-  addDefaults(payload, state.formDefaults);
-  payload.set(`${state.formId}:txtBusqueda`, term);
-  payload.set("javax.faces.ViewState", state.viewState);
-  payload.set("javax.faces.source", `${state.formId}:data1`);
-  payload.set("javax.faces.partial.event", "rich:datascroller:onscroll");
-  payload.set("javax.faces.partial.execute", `${state.formId}:data1 @component`);
-  payload.set("javax.faces.partial.render", "@component");
-  payload.set(`${state.formId}:data1:page`, String(page));
-  payload.set("org.richfaces.ajax.component", `${state.formId}:data1`);
-  payload.set(`${state.formId}:data1`, `${state.formId}:data1`);
-  payload.set("AJAX:EVENTS_COUNT", "1");
-  payload.set("javax.faces.partial.ajax", "true");
-  return payload;
-}
-
-function addDefaults(payload: URLSearchParams, defaults: Record<string, string>): void {
-  Object.entries(defaults).forEach(([key, value]) => {
-    if (key === "javax.faces.ViewState") {
-      return;
-    }
-    if (key === "formBuscador:txtBusqueda") {
-      return;
-    }
-    payload.set(key, value ?? "");
-  });
-}
-
-function addBulkFilterDefaults(payload: URLSearchParams, defaults: Record<string, string>, formId: string): void {
-  const allowedKeys = new Set([
-    `${formId}:buCorte`,
-    `${formId}:buDistrito`,
-    `${formId}:buEspecialidad`,
-    `${formId}:buPretensionValue`,
-    `${formId}:buPretensionInput`,
-    `${formId}:buPalabraClaveValue`,
-    `${formId}:buPalabraClaveInput`,
-    `${formId}:buNroExpediente`,
-    `${formId}:buSala`,
-    `${formId}:buPretensionDelitoSupValue`,
-    `${formId}:buPretensionDelitoSupInput`,
-    `${formId}:buTipoRecurso`,
-    `${formId}:buTipoResolucion`,
-    `${formId}:buTipoResolucionInput`,
-    `${formId}:buAnio`,
-    `${formId}:buOrden`,
-    `${formId}:buOrdenForma`,
-  ]);
-
-  for (const [key, value] of Object.entries(defaults)) {
-    if (!allowedKeys.has(key)) {
-      continue;
-    }
-    payload.set(key, value ?? "");
-  }
-}
 
 function extractBulkSubmitField($: cheerio.CheerioAPI, formId: string): string | undefined {
   const escaped = escapeCssId(formId);

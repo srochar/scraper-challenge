@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeBackoffDelay, executeWithRetry } from "../src/retryPolicy";
+import { computeBackoffDelay, executeWithRetry } from "../src/retry/retryPolicy";
 
 describe("retry policy", () => {
   it("computes increasing backoff with jitter", () => {

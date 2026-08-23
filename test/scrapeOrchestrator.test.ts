@@ -2,12 +2,12 @@ import { mkdtempSync, readFileSync, readdirSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { PortalClient } from "../src/portalClient";
-import { PdfDownloadService } from "../src/pdfDownloadService";
-import { buildRunStorePaths, RunStore } from "../src/runStore";
+import { PortalClient } from "../src/portal/client";
+import { PdfDownloadService } from "../src/download/pdfDownloadService";
+import { buildRunStorePaths, RunStore } from "../src/storage/runStore";
 import { ScrapeOrchestrator } from "../src/scrapeOrchestrator";
 import { ScraperConfig } from "../src/types";
-import { parseDocumentsFromPanelHtml } from "../src/resultParser";
+import { parseDocumentsFromPanelHtml } from "../src/parsing/resultParser";
 import { readJsonLines } from "../src/utils/fs";
 
 const fixturesDir = join(__dirname, "fixtures");

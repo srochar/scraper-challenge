@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
-import { DocumentRecord } from "./types";
-import { stableRecordId } from "./utils/hash";
+import { DocumentRecord } from "../types";
+import { stableRecordId } from "../utils/hash";
 
 export function parseDocumentsFromPanelHtml(panelHtml: string, sourcePage: number): DocumentRecord[] {
   const $ = cheerio.load(panelHtml);

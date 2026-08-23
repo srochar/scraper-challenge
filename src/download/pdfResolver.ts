@@ -1,4 +1,4 @@
-import { DocumentRecord } from "./types";
+import { DocumentRecord } from "../types";
 
 export function resolvePdfUrl(record: DocumentRecord, baseUrl: string): string | undefined {
   if (!record.pdfHref) {

@@ -1,11 +1,11 @@
 import { basename, extname, join } from "path";
 import { writeFile } from "fs/promises";
 import axios, { AxiosInstance } from "axios";
-import { Logger } from "./logger";
-import { DocumentRecord, DownloadResult, FailedRecord, RetryConfig, RetryDependencies } from "./types";
-import { executeWithRetry, shouldRetryStatus } from "./retryPolicy";
-import { ensureDir, fileExists } from "./utils/fs";
-import { toSpanishErrorMessage } from "./utils/errorMessages";
+import { Logger } from "../logging/logger";
+import { DocumentRecord, DownloadResult, FailedRecord, RetryConfig, RetryDependencies } from "../types";
+import { executeWithRetry, shouldRetryStatus } from "../retry/retryPolicy";
+import { ensureDir, fileExists } from "../utils/fs";
+import { toSpanishErrorMessage } from "../utils/errorMessages";
 
 export interface PdfDownloadServiceOptions {
   outputDir: string;
