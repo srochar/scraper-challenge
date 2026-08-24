@@ -8,6 +8,9 @@ import { stableHash } from "../utils/hash";
 import { ensureDir, readJson, writeJson } from "../utils/fs";
 import { LatestPointer, RuntimeConfigFile, RuntimeDefaults } from "./types";
 
+export const DEFAULT_BOT_CONCURRENCY = 2;
+export const MAX_BOT_CONCURRENCY = 4;
+
 export function parseArgs(argv: string[]): Map<string, string | boolean> {
   const args = new Map<string, string | boolean>();
   for (let i = 2; i < argv.length; i += 1) {
@@ -81,6 +84,7 @@ export async function buildConfigFromArgs(
     failedOnly: Boolean(args.get("failed-only")),
     maxRecords: overrides?.maxRecords ?? (args.get("max-records") ? Number(args.get("max-records")) : undefined),
     maxPages: overrides?.maxPages ?? (args.get("max-pages") ? Number(args.get("max-pages")) : undefined),
+    requestTimeoutMs: resolveNumberArg(args, "request-timeout-ms", defaults?.requestTimeoutMs, 30_000),
     requestDelayMs: resolveNumberArg(args, "request-delay-ms", defaults?.requestDelayMs, 0),
     requestJitterMs: resolveNumberArg(args, "request-jitter-ms", defaults?.requestJitterMs, 0),
     logLevel: normalizeLogLevel((args.get("log-level") as string | undefined) ?? defaults?.logLevel),
@@ -117,6 +121,24 @@ export function resolveNumberArg(
     return defaultValue;
   }
   return fallback;
+}
+
+export function normalizeBotConcurrency(raw: number): number {
+  if (!Number.isFinite(raw)) {
+    return DEFAULT_BOT_CONCURRENCY;
+  }
+  return Math.max(1, Math.min(MAX_BOT_CONCURRENCY, Math.floor(raw)));
+}
+
+export function resolveBotConcurrency(
+  args: Map<string, string | boolean>,
+  defaults?: RuntimeDefaults,
+): { requested: number; effective: number } {
+  const requested = resolveNumberArg(args, "bot-concurrency", defaults?.botConcurrency, DEFAULT_BOT_CONCURRENCY);
+  return {
+    requested,
+    effective: normalizeBotConcurrency(requested),
+  };
 }
 
 export function resolveBooleanArg(
@@ -186,6 +208,12 @@ export async function loadRuntimeConfig(configPath: string | undefined): Promise
   }
   if (defaults?.resultFormat !== undefined && typeof defaults.resultFormat !== "string") {
     throw new Error(`Invalid config file '${resolvedPath}': defaults.resultFormat must be a string`);
+  }
+  if (defaults?.botConcurrency !== undefined && typeof defaults.botConcurrency !== "number") {
+    throw new Error(`Invalid config file '${resolvedPath}': defaults.botConcurrency must be a number`);
+  }
+  if (defaults?.requestTimeoutMs !== undefined && typeof defaults.requestTimeoutMs !== "number") {
+    throw new Error(`Invalid config file '${resolvedPath}': defaults.requestTimeoutMs must be a number`);
   }
   if (config.botJobs && !Array.isArray(config.botJobs)) {
     throw new Error(`Invalid config file '${resolvedPath}': botJobs must be an array`);

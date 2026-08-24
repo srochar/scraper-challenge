@@ -35,14 +35,17 @@ npm run scrape -- --bot civil --search civil --max-records 10
 
 Parametros utiles:
 
+- `--config <path>`: archivo JSON con defaults, `botJobs` y/o `botGroups` para no repetir flags largos
 - `--bot <nombre>`: identificador del bot (default `default`)
 - `--runs-dir <path>`: carpeta base de corridas (default `runs`)
 - `--run-id <id>`: reutiliza una corrida especifica
 - `--base-url <url>`: URL del portal (por defecto jurisprudencia)
 - `--search <texto>`: texto de busqueda
 - `--max-records <n>`: limite de registros para corrida acotada
+- `--max-pages <n>`: limite de paginas de resultados a recorrer (si no se envia, usa heuristica interna)
 - `--request-delay-ms <ms>`: pausa fija entre solicitudes de descarga PDF/ZIP (default `0`)
 - `--request-jitter-ms <ms>`: jitter aleatorio adicional por solicitud (default `0`)
+- `--request-timeout-ms <ms>`: timeout HTTP por solicitud al portal (default `30000`)
 - `--output-dir <path>`: override para carpeta de PDFs individuales (default `runs/<bot>/<runId>/artifacts/pdfs`)
 - `--result-format <json|csv>`: formato de salida transformada (default `csv`)
 - `--data-dir <path>`: override legacy para data de corrida (default `runs/<bot>/<runId>`)
@@ -53,8 +56,8 @@ Parametros utiles:
 - `--log-file <path>`: archivo para persistir logs JSONL (default `runs/<bot>/<runId>/logs.jsonl`)
 - `--download-mode <individual|bulk|both>`: modo de descarga de ZIPs (default `individual`)
 - `--unzip [true|false]`: descomprime automaticamente cada ZIP descargado en una carpeta hermana (default `false`)
-- `--config <path>`: archivo JSON con defaults, `botJobs` y/o `botGroups` para no repetir flags largos
-- `--bot-jobs <json>`: lista JSON de jobs multi-bot (se ejecutan secuencialmente, uno por vez)
+- `--bot-jobs <json>`: lista JSON de jobs multi-bot (se ejecutan en paralelo controlado)
+- `--bot-concurrency <n>`: concurrencia de workers para cola multi-bot (default `2`, max `4`, min efectivo `1`)
 - `--network-rps <n>`: requests/segundo globales del dispatcher (default `1`)
 - `--network-cooldown-ms <ms>`: cooldown base al detectar 429 (default `10000`)
 - `--network-cooldown-threshold <n>`: cantidad de 429 en ventana para escalar cooldown (default `3`)
@@ -62,6 +65,91 @@ Parametros utiles:
 - `--network-max-cooldown-ms <ms>`: maximo cooldown global (default `60000`)
 - `--network-jitter-ratio <0..1>`: jitter del rate limit global (default `0.2`)
 - `--max-consecutive-download-failures <n>`: aborta la corrida si hay `n` fallas de descarga seguidas (`0` desactiva, default `0`)
+
+Nota de pacing: si una descarga individual falla, el bot vuelve a aplicar el mismo pacing (`requestDelayMs` + jitter) y luego espera ~5 segundos adicionales antes de pasar al siguiente registro.
+
+## Configuracion por archivo (`--config`)
+
+Estructura general soportada:
+
+```json
+{
+  "environment": "dev",
+  "defaults": {
+    "botConcurrency": 1,
+    "networkRps": 0.5,
+    "networkCooldownMs": 10000,
+    "networkCooldownThreshold": 3,
+    "networkCooldownWindowMs": 30000,
+    "networkMaxCooldownMs": 60000,
+    "networkJitterRatio": 0.2,
+    "requestTimeoutMs": 15000,
+    "requestDelayMs": 1200,
+    "requestJitterMs": 900,
+    "maxConsecutiveDownloadFailures": 3,
+    "downloadMode": "individual",
+    "resultFormat": "csv",
+    "unzip": false,
+    "logLevel": "debug",
+    "logFormat": "pretty"
+  },
+  "botJobs": [
+    {
+      "id": "civil-herencia",
+      "bot": "civil",
+      "searchTerm": "herencia",
+      "maxPages": 2,
+      "maxRecords": 20
+    }
+  ],
+  "botGroups": [
+    {
+      "bot": "familia",
+      "maxPages": 2,
+      "maxRecords": 20,
+      "searchTerms": [
+        "familia",
+        {
+          "id": "familia-alimentos",
+          "term": "alimentos",
+          "maxPages": 3,
+          "maxRecords": 30
+        }
+      ]
+    }
+  ]
+}
+```
+
+Campos y descripcion:
+
+- `environment`: etiqueta libre de entorno (`dev`, `prod`, etc.) para identificar perfiles.
+- `defaults`: valores por defecto que se aplican si no se pasan flags por CLI.
+- `defaults.botConcurrency`: concurrencia de jobs en cola multi-bot (se acota entre 1 y 4).
+- `defaults.networkRps`: requests/segundo globales del dispatcher.
+- `defaults.networkCooldownMs`: cooldown base tras 429.
+- `defaults.networkCooldownThreshold`: cantidad de 429 para escalar cooldown.
+- `defaults.networkCooldownWindowMs`: ventana de tiempo para contar 429.
+- `defaults.networkMaxCooldownMs`: tope maximo del cooldown adaptativo.
+- `defaults.networkJitterRatio`: jitter del rate limit global (`0..1`).
+- `defaults.requestTimeoutMs`: timeout HTTP por request al portal.
+- `defaults.requestDelayMs`: pausa fija entre operaciones de descarga.
+- `defaults.requestJitterMs`: jitter aleatorio adicional para la pausa.
+- `defaults.maxConsecutiveDownloadFailures`: umbral para abortar por fallas seguidas (`0` desactiva).
+- `defaults.downloadMode`: `individual`, `bulk` o `both`.
+- `defaults.resultFormat`: `csv` o `json`.
+- `defaults.unzip`: descomprimir ZIPs bulk automaticamente.
+- `defaults.logLevel`: `debug`, `info`, `warn`, `error`.
+- `defaults.logFormat`: `json` o `pretty`.
+- `botJobs`: lista explicita de jobs (cada item requiere `bot` y `searchTerm`; `id`, `maxPages`, `maxRecords` opcionales).
+- `botGroups`: forma compacta de declarar grupos por bot.
+- `botGroups[].searchTerms`: acepta strings o objetos `{ id?, term, maxPages?, maxRecords? }`.
+
+Prioridad de configuracion:
+
+- CLI (`--network-rps`, etc.)
+- `defaults` en `--config`
+- default interno del programa
 
 ## Artefactos de salida
 
@@ -135,7 +223,7 @@ Build de imagen:
 docker build -t scraping-bot .
 ```
 
-Ejecucion multi-bot secuencial (una sesion por job) + network queue global:
+Ejecucion multi-bot en paralelo controlado (sesion segura por lane) + network queue global:
 
 ```bash
 docker compose up -d
@@ -206,18 +294,24 @@ Prioridad de configuracion:
 
 `botGroups` se expande automaticamente a jobs. Si defines ambos, se ejecutan `botJobs` + `botGroups`.
 
+`botConcurrency` controla cuantos jobs quedan activos al mismo tiempo. Guardrails:
+- Default operativo: `2`
+- Minimo efectivo: `1`
+- Maximo permitido: `4` (si envias un valor mayor por CLI/config, el proceso lo acota y emite warning)
+
 `--bot-jobs` por CLI (si se pasa) reemplaza todo lo del archivo para esa ejecucion.
 
-Ejemplo local (3 bots en cola con rate limit global):
+Ejemplo local (3 bots con concurrencia 2 y rate limit global compartido):
 
 ```bash
-npm run scrape -- --bot-jobs "[{\"id\":\"civil\",\"bot\":\"civil\",\"searchTerm\":\"civil\",\"maxPages\":2},{\"id\":\"familia\",\"bot\":\"familia\",\"searchTerm\":\"familia\",\"maxPages\":2},{\"id\":\"impuestos\",\"bot\":\"impuestos\",\"searchTerm\":\"empresarios absuelto evadir impuesto\",\"maxPages\":2}]" --network-rps 1 --network-cooldown-ms 10000 --network-cooldown-threshold 3 --network-cooldown-window-ms 30000 --network-jitter-ratio 0.2 --download-mode individual --log-format pretty
+npm run scrape -- --bot-jobs "[{\"id\":\"civil\",\"bot\":\"civil\",\"searchTerm\":\"civil\",\"maxPages\":2},{\"id\":\"familia\",\"bot\":\"familia\",\"searchTerm\":\"familia\",\"maxPages\":2},{\"id\":\"impuestos\",\"bot\":\"impuestos\",\"searchTerm\":\"empresarios absuelto evadir impuesto\",\"maxPages\":2}]" --bot-concurrency 2 --network-rps 1 --network-cooldown-ms 10000 --network-cooldown-threshold 3 --network-cooldown-window-ms 30000 --network-jitter-ratio 0.2 --download-mode individual --log-format pretty
 ```
 
 ## Notas
 
 - El portal puede devolver 429; el descargador aplica reintentos con backoff exponencial y jitter.
 - El dispatcher de red aplica un limite global de requests y cooldown adaptativo cuando detecta 429.
+- En ejecucion concurrente, la red sigue una cola global compartida y serializa operaciones por `sessionKey` para proteger estado JSF.
 - Los tests unitarios cubren secuencias simuladas de 429, agotamiento de reintentos y continuidad del procesamiento.
 - En ejecucion multi-job, un job se reporta con `success: false` cuando termina con descargas fallidas (`summary.failed > 0`), aunque la corrida haya finalizado sin excepcion fatal.
 - En `downloadMode=bulk`, el scraper ejecuta seleccion masiva por pagina y envia el submit final alineado al flujo real del portal (HAR), evitando campos extra que invaliden la seleccion.

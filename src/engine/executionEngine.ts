@@ -15,6 +15,7 @@ export interface PortalResponseLike {
 }
 
 export interface ExecutionPortalOps {
+  initialize?: () => Promise<PortalResponseLike>;
   submitSearchFromInicio: () => Promise<PortalResponseLike>;
   search: () => Promise<PortalResponseLike>;
   gotoPage: (page: number) => Promise<PortalResponseLike>;
@@ -30,7 +31,7 @@ export class ExecutionEngine {
   constructor(private readonly options: ExecutionEngineOptions) {}
 
   async collectDiscoveredRecords(ops: ExecutionPortalOps): Promise<DocumentRecord[]> {
-    const initResult = await ops.submitSearchFromInicio();
+    const initResult = await this.initializeWithFallback(ops);
     const records: DocumentRecord[] = [];
 
     const maxPages = resolveMaxPages(this.options.maxPages);
@@ -72,6 +73,21 @@ export class ExecutionEngine {
     }
 
     return records;
+  }
+
+  private async initializeWithFallback(ops: ExecutionPortalOps): Promise<PortalResponseLike> {
+    try {
+      return await ops.submitSearchFromInicio();
+    } catch (error) {
+      if (!ops.initialize) {
+        throw error;
+      }
+      this.options.logger?.warn("Inicio via formulario fallo; probando inicializacion alternativa", {
+        accion: "init_fallback",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return ops.initialize();
+    }
   }
 }
 

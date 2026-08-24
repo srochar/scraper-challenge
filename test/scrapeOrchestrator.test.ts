@@ -25,6 +25,7 @@ function createConfig(temp: string, overrides: Partial<ScraperConfig> = {}): Scr
     dataDir: join(temp, "data"),
     resume: false,
     failedOnly: false,
+    requestTimeoutMs: 30_000,
     requestDelayMs: 0,
     requestJitterMs: 0,
     logLevel: "info",

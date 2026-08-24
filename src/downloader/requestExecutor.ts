@@ -191,6 +191,11 @@ function isRetryableInitError(error: unknown): boolean {
     return true;
   }
 
+  const code = getErrorCode(error);
+  if (code && ["ECONNABORTED", "ETIMEDOUT", "ECONNRESET", "EPIPE", "EAI_AGAIN"].includes(code)) {
+    return true;
+  }
+
   const status = getErrorStatus(error);
   if (typeof status !== "number") {
     return false;
@@ -213,4 +218,15 @@ function getErrorStatus(error: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || !error) {
+    return undefined;
+  }
+  if (!("code" in error)) {
+    return undefined;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
 }

@@ -1,12 +1,13 @@
 {
   "environment": "prod",
   "defaults": {
-    "botConcurrency": 1,
+    "botConcurrency": 2,
     "networkRps": 1,
     "networkCooldownMs": 10000,
     "networkCooldownThreshold": 3,
     "networkCooldownWindowMs": 30000,
     "networkJitterRatio": 0.2,
+    "requestTimeoutMs": 30000,
     "requestDelayMs": 1200,
     "requestJitterMs": 900,
     "maxConsecutiveDownloadFailures": 3,

@@ -5,6 +5,8 @@ import { Logger } from "../logging/logger";
 import { RunStore } from "../storage/runStore";
 import { DocumentRecord, FailedRecord, RunStage, ScraperConfig, TransformedRecord } from "../types";
 
+const FAILURE_COOLDOWN_MS = 5000;
+
 export interface RecordDownloadOutcome {
   result: {
     status: "downloaded" | "missing_link" | "failed";
@@ -125,6 +127,19 @@ export async function processRecordsPipeline(params: RecordPipelineParams): Prom
           });
         }
         assertFailureThreshold(consecutiveDownloadFailures);
+        await pace("download.after_failure", {
+          recordId: normalized.id,
+          page: normalized.sourcePage,
+          attempts: download.result.attempts,
+          reason: download.result.reason,
+        });
+        logger?.warn("Cooling down after failed download", {
+          recordId: normalized.id,
+          page: normalized.sourcePage,
+          cooldownMs: FAILURE_COOLDOWN_MS,
+          reason: download.result.reason,
+        });
+        await new Promise<void>((resolve) => setTimeout(resolve, FAILURE_COOLDOWN_MS));
       }
 
       transformedRecords.push({

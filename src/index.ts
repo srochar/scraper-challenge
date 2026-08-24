@@ -3,12 +3,22 @@ import { PortalClient } from "./portal/client";
 import { PdfDownloadService } from "./download/pdfDownloadService";
 import { buildInitialManifest, buildRunStorePaths, RunStore } from "./storage/runStore";
 import { ScrapeOrchestrator } from "./scrapeOrchestrator";
+import { BotJob } from "./botQueue";
 import { RetryConfig, RunErrorEvent, ScrapeSummary, ScraperConfig } from "./types";
 import { createLogger, normalizeLogFormat, normalizeLogLevel } from "./logging/logger";
 import { createDispatcher } from "./runtime/dispatcher";
-import { buildConfig, buildConfigFromArgs, expandConfigBotJobs, generateRunId, loadRuntimeConfig, parseArgs } from "./runtime/config";
+import {
+  buildConfig,
+  buildConfigFromArgs,
+  expandConfigBotJobs,
+  generateRunId,
+  loadRuntimeConfig,
+  MAX_BOT_CONCURRENCY,
+  parseArgs,
+  resolveBotConcurrency,
+} from "./runtime/config";
 import { toFatalErrorPayload } from "./runtime/fatal";
-import { parseBotJobs } from "./runtime/jobs";
+import { executeBotJobs, parseBotJobs } from "./runtime/jobs";
 import { buildUnsuccessfulSummaryMessage, isSummarySuccessful, writeGlobalConsolidatedResults } from "./runtime/results";
 import { toSpanishErrorMessage } from "./utils/errorMessages";
 
@@ -24,6 +34,7 @@ async function main(): Promise<void> {
     context: { module: "main" },
   });
   const dispatcher = createDispatcher(args, runtimeConfig.defaults);
+  const { requested: requestedBotConcurrency, effective: botConcurrency } = resolveBotConcurrency(args, runtimeConfig.defaults);
   const jobs = parseBotJobs(
     args.get("bot-jobs") as string | undefined,
     expandConfigBotJobs(runtimeConfig),
@@ -35,7 +46,17 @@ async function main(): Promise<void> {
     startedAt: processStartedAt,
     jobsPlanned: jobs.length > 0 ? jobs.length : 1,
     queueMode: jobs.length > 0,
+    botConcurrencyRequested: requestedBotConcurrency,
+    botConcurrencyEffective: botConcurrency,
   });
+  if (requestedBotConcurrency !== botConcurrency) {
+    processLogger.warn("botConcurrency fuera de rango; se aplicara valor acotado", {
+      accion: "normalizar_concurrencia",
+      botConcurrencyRequested: requestedBotConcurrency,
+      botConcurrencyEffective: botConcurrency,
+      botConcurrencyMax: MAX_BOT_CONCURRENCY,
+    });
+  }
   let processSuccess = false;
   let processErrorMessage: string | undefined;
 
@@ -80,21 +101,14 @@ async function main(): Promise<void> {
       return;
     }
 
-    const results: Array<{ id: string; bot: string; success: boolean; error?: string }> = [];
     const runResultSources: Array<{ path: string; bot: string; runId: string }> = [];
-    for (const job of jobs) {
+    const results = await executeBotJobs(jobs, botConcurrency, async (job) => {
       const spiderStartedAtMs = Date.now();
       const spiderStartedAt = new Date(spiderStartedAtMs).toISOString();
-      processLogger.info("Inicio de arana", {
-        accion: "inicio_arana",
-        jobId: job.id,
-        bot: job.bot,
-        busqueda: job.searchTerm,
-        startedAt: spiderStartedAt,
-      });
       let spiderSuccess = false;
       let spiderErrorMessage: string | undefined;
       let spiderRunId: string | undefined;
+      let sessionKey: string | undefined;
       try {
         const config = await buildConfigFromArgs(
           args,
@@ -107,8 +121,19 @@ async function main(): Promise<void> {
           },
           runtimeConfig.defaults,
         );
+        sessionKey = config.sessionKey;
+        processLogger.info("Inicio de arana", {
+          accion: "inicio_arana",
+          jobId: job.id,
+          bot: job.bot,
+          busqueda: job.searchTerm,
+          runId: config.runId,
+          sessionKey,
+          startedAt: spiderStartedAt,
+          botConcurrencyEffective: botConcurrency,
+        });
         spiderRunId = config.runId;
-        const summary = await runSingleConfig(config, dispatcher);
+        const summary = await runSingleConfig(config, dispatcher, { job });
         runResultSources.push({
           path: join(config.resultsDir, config.resultFormat === "json" ? "records.json" : "records.csv"),
           bot: config.bot,
@@ -116,20 +141,9 @@ async function main(): Promise<void> {
         });
         spiderSuccess = isSummarySuccessful(summary);
         spiderErrorMessage = spiderSuccess ? undefined : buildUnsuccessfulSummaryMessage(summary);
-        results.push({
-          id: job.id,
-          bot: job.bot,
-          success: spiderSuccess,
-          error: spiderErrorMessage,
-        });
       } catch (error) {
         spiderErrorMessage = toSpanishErrorMessage(error);
-        results.push({
-          id: job.id,
-          bot: job.bot,
-          success: false,
-          error: spiderErrorMessage,
-        });
+        throw error;
       } finally {
         const spiderFinishedAtMs = Date.now();
         processLogger.info("Fin de arana", {
@@ -138,12 +152,20 @@ async function main(): Promise<void> {
           bot: job.bot,
           busqueda: job.searchTerm,
           runId: spiderRunId,
+          sessionKey,
           success: spiderSuccess,
           errorMessage: spiderErrorMessage,
           ...buildTimingMeta(spiderStartedAtMs, spiderStartedAt, spiderFinishedAtMs),
         });
       }
-    }
+    });
+    runResultSources.sort((a, b) => {
+      const order = String(a.bot).localeCompare(String(b.bot));
+      if (order !== 0) {
+        return order;
+      }
+      return String(a.runId).localeCompare(String(b.runId));
+    });
 
     if (runResultSources.length > 0) {
       await writeGlobalConsolidatedResults(runsRoot, runResultSources);
@@ -181,7 +203,11 @@ function buildTimingMeta(startedAtMs: number, startedAt: string, endedAtMs: numb
   };
 }
 
-async function runSingleConfig(config: ScraperConfig, dispatcher: ReturnType<typeof createDispatcher>): Promise<ScrapeSummary> {
+async function runSingleConfig(
+  config: ScraperConfig,
+  dispatcher: ReturnType<typeof createDispatcher>,
+  options?: { job?: BotJob },
+): Promise<ScrapeSummary> {
   const runStore = new RunStore(buildRunStorePaths(config.dataDir));
   await runStore.initialize();
   const manifest = buildInitialManifest(config);
@@ -196,6 +222,8 @@ async function runSingleConfig(config: ScraperConfig, dispatcher: ReturnType<typ
     context: {
       bot: config.bot,
       busqueda: config.searchTerm,
+      sessionKey: config.sessionKey,
+      jobId: options?.job?.id,
     },
   });
   logger.info("Inicio de corrida", { accion: "inicio" });
@@ -213,7 +241,7 @@ async function runSingleConfig(config: ScraperConfig, dispatcher: ReturnType<typ
     initPath: "/faces/page/inicio.xhtml",
     resultPath: "/faces/page/resultado.xhtml",
     debugCaptureDir: config.debugCaptureDir,
-    requestTimeoutMs: 30_000,
+    requestTimeoutMs: config.requestTimeoutMs,
   }, undefined, logger.child({ module: "portalClient" }));
 
   const downloader = new PdfDownloadService({
@@ -262,6 +290,8 @@ async function runSingleConfig(config: ScraperConfig, dispatcher: ReturnType<typ
       context: {
         searchTerm: config.searchTerm,
         downloadMode: config.downloadMode,
+        sessionKey: config.sessionKey,
+        jobId: options?.job?.id,
       },
     };
     await runStore.appendError(event);

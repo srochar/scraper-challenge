@@ -116,6 +116,7 @@ export interface ScraperConfig {
   failedOnly: boolean;
   maxRecords?: number;
   maxPages?: number;
+  requestTimeoutMs: number;
   requestDelayMs: number;
   requestJitterMs: number;
   logLevel: "debug" | "info" | "warn" | "error";

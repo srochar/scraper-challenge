@@ -3,6 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
 import { parseArgs, buildConfig, expandConfigBotJobs, loadRuntimeConfig } from "../src/index";
+import { resolveBotConcurrency } from "../src/runtime/config";
 
 describe("runtime config", () => {
   it("applies defaults from config file", async () => {
@@ -10,6 +11,7 @@ describe("runtime config", () => {
     const configPath = join(temp, "scraper.config.json");
     writeFileSync(configPath, JSON.stringify({
       defaults: {
+        requestTimeoutMs: 45000,
         requestDelayMs: 1200,
         requestJitterMs: 900,
         downloadMode: "both",
@@ -35,6 +37,7 @@ describe("runtime config", () => {
 
     expect(config.requestDelayMs).toBe(1200);
     expect(config.requestJitterMs).toBe(900);
+    expect(config.requestTimeoutMs).toBe(45000);
     expect(config.downloadMode).toBe("both");
     expect(config.resultFormat).toBe("csv");
     expect(config.unzip).toBe(true);
@@ -82,6 +85,7 @@ describe("runtime config", () => {
     const configPath = join(temp, "scraper.config.json");
     writeFileSync(configPath, JSON.stringify({
       defaults: {
+        requestTimeoutMs: 45000,
         requestDelayMs: 1200,
         downloadMode: "bulk",
         logFormat: "json",
@@ -103,6 +107,8 @@ describe("runtime config", () => {
       "25",
       "--download-mode",
       "individual",
+      "--request-timeout-ms",
+      "70000",
       "--unzip",
       "false",
       "--log-format",
@@ -110,6 +116,7 @@ describe("runtime config", () => {
     ]);
 
     expect(config.requestDelayMs).toBe(25);
+    expect(config.requestTimeoutMs).toBe(70000);
     expect(config.downloadMode).toBe("individual");
     expect(config.unzip).toBe(false);
     expect(config.logFormat).toBe("pretty");
@@ -160,5 +167,43 @@ describe("runtime config", () => {
     }), "utf8");
 
     await expect(loadRuntimeConfig(configPath)).rejects.toThrow(/searchTerms must be a non-empty array/);
+  });
+
+  it("rejects non-numeric defaults.botConcurrency", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "scraper-config-bot-concurrency-invalid-"));
+    const configPath = join(temp, "scraper.config.json");
+    writeFileSync(configPath, JSON.stringify({
+      defaults: {
+        botConcurrency: "fast",
+      },
+    }), "utf8");
+
+    await expect(loadRuntimeConfig(configPath)).rejects.toThrow(/defaults\.botConcurrency must be a number/);
+  });
+
+  it("rejects non-numeric defaults.requestTimeoutMs", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "scraper-config-timeout-invalid-"));
+    const configPath = join(temp, "scraper.config.json");
+    writeFileSync(configPath, JSON.stringify({
+      defaults: {
+        requestTimeoutMs: "slow",
+      },
+    }), "utf8");
+
+    await expect(loadRuntimeConfig(configPath)).rejects.toThrow(/defaults\.requestTimeoutMs must be a number/);
+  });
+
+  it("normalizes bot concurrency with configured upper bound", () => {
+    const fromCli = resolveBotConcurrency(parseArgs(["node", "script", "--bot-concurrency", "9"]), {
+      botConcurrency: 2,
+    });
+    expect(fromCli.requested).toBe(9);
+    expect(fromCli.effective).toBe(4);
+
+    const fromDefault = resolveBotConcurrency(parseArgs(["node", "script"]), {
+      botConcurrency: 3,
+    });
+    expect(fromDefault.requested).toBe(3);
+    expect(fromDefault.effective).toBe(3);
   });
 });

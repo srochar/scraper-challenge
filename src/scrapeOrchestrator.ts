@@ -150,6 +150,11 @@ export class ScrapeOrchestrator {
     });
     const discoveryTask = beginTask("discover_records");
     const records = await engine.collectDiscoveredRecords({
+      initialize: async () => requestExecutor.executePortalInitWithRetry(
+        "init",
+        "initialize",
+        async () => this.portalClient.initialize(),
+      ),
       submitSearchFromInicio: async () => requestExecutor.executePortalInitWithRetry(
         "init",
         "submitSearchFromInicio",

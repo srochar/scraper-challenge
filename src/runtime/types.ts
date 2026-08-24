@@ -14,6 +14,7 @@ export interface RuntimeDefaults {
   networkJitterRatio?: number;
   requestDelayMs?: number;
   requestJitterMs?: number;
+  requestTimeoutMs?: number;
   downloadMode?: "individual" | "bulk" | "both";
   resultFormat?: "csv" | "json";
   unzip?: boolean;
