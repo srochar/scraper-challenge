@@ -36,6 +36,11 @@ function createConfig(temp: string, overrides: Partial<ScraperConfig> = {}): Scr
     unzip: false,
     sessionKey: "civil:test-session",
     maxConsecutiveDownloadFailures: 0,
+    duplicate429WindowMs: 30_000,
+    duplicate429Threshold: 3,
+    headerRotationEnabled: false,
+    headerRotationStrategy: "off",
+    headerProfileId: undefined,
     ...overrides,
   };
 }
@@ -100,7 +105,7 @@ describe("scrape orchestrator", () => {
     expect(transformed.length).toBe(2);
     expect(transformed.some((record) => record.downloadStatus === "failed")).toBe(true);
     expect(transformed.some((record) => record.downloadStatus === "downloaded")).toBe(true);
-  });
+  }, 12_000);
 
   it("keeps processing when one case has no zip link", async () => {
     const panel =
@@ -616,7 +621,115 @@ describe("scrape orchestrator", () => {
     const orchestrator = new ScrapeOrchestrator(fakePortal, fakeDownloader, runStore, config);
 
     await expect(orchestrator.run()).rejects.toThrow(/fallas consecutivas de descarga/);
-  });
+  }, 12_000);
+
+  it("suppresses duplicate URL retries after first failed canonical URL", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><div class="row">Doc A | Civil <a href="https://example.com/shared.pdf?b=2&a=1">PDF</a></div><div class="row">Doc B | Civil <a href="https://example.com/shared.pdf?a=1&b=2">PDF</a></div></div>';
+
+    const fakePortal = {
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      search: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": panel },
+      }),
+    } as unknown as PortalClient;
+
+    let calls = 0;
+    const fakeAxios = {
+      get: async () => {
+        calls += 1;
+        const error = new Error("Too many requests") as Error & { status?: number };
+        error.status = 429;
+        throw error;
+      },
+    } as never;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-dup-suppress-"));
+    const downloader = new PdfDownloadService(
+      {
+        outputDir: join(temp, "pdfs"),
+        retryConfig: { maxRetries: 2, initialDelayMs: 1, backoffMultiplier: 2, maxDelayMs: 10, jitterRatio: 0 },
+        retryDeps: { wait: async () => undefined, random: () => 0 },
+      },
+      fakeAxios,
+    );
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, { requestDelayMs: 0, requestJitterMs: 0 });
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, downloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(summary.processed).toBe(2);
+    expect(summary.failed).toBe(2);
+    expect(calls).toBe(3);
+
+    const transformed = JSON.parse(readFileSync(join(temp, "results", "records.json"), "utf8")) as Array<{
+      id: string;
+      downloadReason?: string;
+      downloadAttempts: number;
+    }>;
+    expect(transformed).toHaveLength(2);
+    expect(transformed[0].downloadReason).toBe("http_429");
+    expect(transformed[1].downloadReason).toBe("duplicate_pdf_url_suppressed");
+    expect(transformed[1].downloadAttempts).toBe(0);
+  }, 12_000);
+
+  it("continues processing after guardrail activation on repeated 429", async () => {
+    const panel =
+      '<div id="formBuscador:panel"><div class="row">Doc A | Civil <a href="https://example.com/a.pdf">PDF</a></div><div class="row">Doc B | Civil <a href="https://example.com/b.pdf">PDF</a></div></div>';
+
+    const fakePortal = {
+      submitSearchFromInicio: async () => ({ raw: "", state: { formId: "formBuscador", viewState: "1:1", formDefaults: {} }, isPartial: false }),
+      search: async () => ({
+        raw: "",
+        state: { formId: "formBuscador", viewState: "2:2", formDefaults: {} },
+        isPartial: true,
+        updates: { "formBuscador:panel": panel },
+      }),
+    } as unknown as PortalClient;
+
+    const fakeAxios = {
+      get: async (url: string) => {
+        if (url.endsWith("a.pdf")) {
+          const error = new Error("Too many requests") as Error & { status?: number };
+          error.status = 429;
+          throw error;
+        }
+        return { status: 200, data: Buffer.from("PDF") };
+      },
+    } as never;
+
+    const temp = mkdtempSync(join(tmpdir(), "scraper-orch-guardrail-"));
+    const downloader = new PdfDownloadService(
+      {
+        outputDir: join(temp, "pdfs"),
+        retryConfig: { maxRetries: 1, initialDelayMs: 1, backoffMultiplier: 2, maxDelayMs: 10, jitterRatio: 0 },
+        retryDeps: { wait: async () => undefined, random: () => 0 },
+      },
+      fakeAxios,
+    );
+    const runStore = new RunStore(buildRunStorePaths(join(temp, "data")));
+    const config = createConfig(temp, {
+      duplicate429Threshold: 1,
+      duplicate429WindowMs: 30_000,
+      requestDelayMs: 0,
+      requestJitterMs: 0,
+    });
+
+    const orchestrator = new ScrapeOrchestrator(fakePortal, downloader, runStore, config);
+    const summary = await orchestrator.run();
+
+    expect(summary.processed).toBe(2);
+    expect(summary.failed).toBe(1);
+    expect(summary.downloaded).toBe(1);
+
+    const errors = await readJsonLines(join(temp, "data", "errors.jsonl"));
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors[0].context?.guardrailActivated).toBe(true);
+  }, 12_000);
 
   it("retries init on transient 500 and continues", async () => {
     const panel =

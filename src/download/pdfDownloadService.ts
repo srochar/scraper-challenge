@@ -2,15 +2,30 @@ import { basename, extname, join } from "path";
 import { writeFile } from "fs/promises";
 import axios, { AxiosInstance } from "axios";
 import { Logger } from "../logging/logger";
+import { HeaderSelector } from "../network/headerSelector";
 import { DocumentRecord, DownloadResult, FailedRecord, RetryConfig, RetryDependencies } from "../types";
 import { executeWithRetry, shouldRetryStatus } from "../retry/retryPolicy";
 import { ensureDir, fileExists } from "../utils/fs";
 import { toSpanishErrorMessage } from "../utils/errorMessages";
+import { normalizeCanonicalPdfUrl } from "./canonicalPdfUrl";
 
 export interface PdfDownloadServiceOptions {
   outputDir: string;
   retryConfig: RetryConfig;
   retryDeps?: RetryDependencies;
+  headerSelector?: HeaderSelector;
+}
+
+export interface DownloadAttemptSignal {
+  attempt: number;
+  delayMs: number;
+  status?: number;
+  url?: string;
+  canonicalUrl?: string;
+}
+
+export interface DownloadCallOptions {
+  onRetrySignal?: (signal: DownloadAttemptSignal) => void;
 }
 
 export class PdfDownloadService {
@@ -19,6 +34,7 @@ export class PdfDownloadService {
   private readonly retryConfig: RetryConfig;
   private readonly retryDeps: RetryDependencies;
   private readonly logger?: Logger;
+  private readonly headerSelector: HeaderSelector;
 
   constructor(options: PdfDownloadServiceOptions, axiosInstance?: AxiosInstance, logger?: Logger) {
     this.outputDir = options.outputDir;
@@ -28,13 +44,18 @@ export class PdfDownloadService {
         wait: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
         random: () => Math.random(),
       };
+    this.headerSelector = options.headerSelector ?? new HeaderSelector({
+      enabled: false,
+      strategy: "off",
+      sessionKey: "default",
+    });
     this.axios = axiosInstance ?? axios.create({
       responseType: "arraybuffer",
     });
     this.logger = logger;
   }
 
-  async download(record: DocumentRecord): Promise<{ result: DownloadResult; failure?: FailedRecord }> {
+  async download(record: DocumentRecord, options?: DownloadCallOptions): Promise<{ result: DownloadResult; failure?: FailedRecord }> {
     if (!record.pdfHref) {
       this.logger?.warn("Registro sin enlace PDF", { accion: "descarga", recordId: record.id });
       return {
@@ -62,7 +83,10 @@ export class PdfDownloadService {
     const outcome = await executeWithRetry(
       async () => {
         this.logger?.debug("Downloading PDF", { recordId: record.id, url: record.pdfHref });
-        const response = await this.axios.get<ArrayBuffer>(record.pdfHref as string, { responseType: "arraybuffer" });
+        const response = await this.axios.get<ArrayBuffer>(record.pdfHref as string, {
+          responseType: "arraybuffer",
+          headers: this.headerSelector.select("pdf-download"),
+        });
         if (response.status >= 400) {
           const err = new Error(`HTTP_${response.status}`);
           (err as Error & { status?: number }).status = response.status;
@@ -75,7 +99,19 @@ export class PdfDownloadService {
         return status ? shouldRetryStatus(status) : true;
       },
       this.retryConfig,
-      this.retryDeps,
+      {
+        ...this.retryDeps,
+        onRetry: ({ attempt, delayMs, error }) => {
+          const status = getErrorStatus(error);
+          options?.onRetrySignal?.({
+            attempt,
+            delayMs,
+            status,
+            url: record.pdfHref,
+            canonicalUrl: normalizeCanonicalPdfUrl(record.pdfHref),
+          });
+        },
+      },
     );
 
     if (!outcome.success || !outcome.value) {
@@ -91,6 +127,7 @@ export class PdfDownloadService {
         reason,
         attempts: outcome.attempts,
         pdfUrl: record.pdfHref,
+        canonicalPdfUrl: normalizeCanonicalPdfUrl(record.pdfHref),
         timestamp: new Date().toISOString(),
       };
 

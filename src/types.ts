@@ -24,6 +24,12 @@ export interface FailedRecord {
   attempts: number;
   pdfUrl?: string;
   timestamp: string;
+  canonicalPdfUrl?: string;
+  duplicateSuppressed?: boolean;
+  rateLimitHitsInWindow?: number;
+  cooldownMs?: number;
+  cooldownMultiplier?: number;
+  guardrailActivated?: boolean;
 }
 
 export type RunStage =
@@ -65,6 +71,13 @@ export interface RetryConfig {
 export interface RetryDependencies {
   wait: (ms: number) => Promise<void>;
   random: () => number;
+  onRetry?: (event: RetryEvent) => void | Promise<void>;
+}
+
+export interface RetryEvent {
+  attempt: number;
+  delayMs: number;
+  error: unknown;
 }
 
 export interface DownloadResult {
@@ -127,5 +140,10 @@ export interface ScraperConfig {
   unzip: boolean;
   sessionKey: string;
   maxConsecutiveDownloadFailures: number;
+  duplicate429WindowMs: number;
+  duplicate429Threshold: number;
   debugCaptureDir?: string;
+  headerRotationEnabled?: boolean;
+  headerRotationStrategy?: "off" | "per-run" | "per-request";
+  headerProfileId?: string;
 }

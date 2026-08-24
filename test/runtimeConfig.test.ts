@@ -75,6 +75,8 @@ describe("runtime config", () => {
     expect(config.downloadMode).toBe("individual");
     expect(config.unzip).toBe(false);
     expect(config.logFormat).toBe("pretty");
+    expect(config.headerRotationEnabled).toBe(false);
+    expect(config.headerRotationStrategy).toBe("off");
   });
 
   it("applies internal defaults when CLI flags are omitted", async () => {
@@ -96,6 +98,48 @@ describe("runtime config", () => {
     expect(config.downloadMode).toBe("individual");
     expect(config.resultFormat).toBe("csv");
     expect(config.unzip).toBe(false);
+    expect(config.headerRotationEnabled).toBe(false);
+    expect(config.headerRotationStrategy).toBe("off");
+  });
+
+  it("accepts header rotation flags", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "scraper-config-headers-"));
+    const config = await buildConfig([
+      "node",
+      "script",
+      "--runs-dir",
+      temp,
+      "--bot",
+      "civil",
+      "--search",
+      "civil",
+      "--header-rotation",
+      "true",
+      "--header-rotation-strategy",
+      "per-request",
+      "--header-profile-id",
+      "edge-win",
+    ]);
+
+    expect(config.headerRotationEnabled).toBe(true);
+    expect(config.headerRotationStrategy).toBe("per-request");
+    expect(config.headerProfileId).toBe("edge-win");
+  });
+
+  it("fails on unsupported header rotation strategy", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "scraper-config-headers-invalid-"));
+    await expect(buildConfig([
+      "node",
+      "script",
+      "--runs-dir",
+      temp,
+      "--bot",
+      "civil",
+      "--search",
+      "civil",
+      "--header-rotation-strategy",
+      "random",
+    ])).rejects.toThrow(/Unsupported header rotation strategy/);
   });
 
   it("normalizes bot concurrency with upper bound", () => {

@@ -6,6 +6,7 @@ import { ScrapeOrchestrator } from "./scrapeOrchestrator";
 import { BotJob } from "./botQueue";
 import { RetryConfig, RunErrorEvent, ScrapeSummary, ScraperConfig } from "./types";
 import { createLogger, normalizeLogFormat, normalizeLogLevel } from "./logging/logger";
+import { HeaderSelector } from "./network/headerSelector";
 import { createDispatcher } from "./runtime/dispatcher";
 import {
   buildConfig,
@@ -238,12 +239,31 @@ async function runSingleConfig(
     resultPath: "/faces/page/resultado.xhtml",
     debugCaptureDir: config.debugCaptureDir,
     requestTimeoutMs: config.requestTimeoutMs,
+    headerSelector: new HeaderSelector({
+      enabled: config.headerRotationEnabled,
+      strategy: config.headerRotationStrategy,
+      forcedProfileId: config.headerProfileId,
+      sessionKey: config.sessionKey,
+    }),
   }, undefined, logger.child({ module: "portalClient" }));
 
   const downloader = new PdfDownloadService({
     outputDir: config.outputDir,
     retryConfig,
+    headerSelector: new HeaderSelector({
+      enabled: config.headerRotationEnabled,
+      strategy: config.headerRotationStrategy,
+      forcedProfileId: config.headerProfileId,
+      sessionKey: config.sessionKey,
+    }),
   }, undefined, logger.child({ module: "pdfDownloadService" }));
+
+  logger.info("Header rotation configurado", {
+    accion: "header_rotation",
+    enabled: config.headerRotationEnabled,
+    strategy: config.headerRotationStrategy,
+    forcedProfileId: config.headerProfileId,
+  });
 
   const orchestrator = new ScrapeOrchestrator(
     portalClient,

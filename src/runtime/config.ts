@@ -1,6 +1,7 @@
 import { randomBytes } from "crypto";
 import { join } from "path";
 import { normalizeLogFormat, normalizeLogLevel } from "../logging/logger";
+import { isHeaderRotationStrategy } from "../network/headerSelector";
 import { ScraperConfig } from "../types";
 import { stableHash } from "../utils/hash";
 import { ensureDir, readJson, writeJson } from "../utils/fs";
@@ -68,6 +69,9 @@ export async function buildConfigFromArgs(
   await writeJson(latestPath, { runId, updatedAt: new Date().toISOString() } as LatestPointer);
 
   const resultFormat = resolveResultFormat(args.get("result-format"), undefined);
+  const headerRotationEnabled = resolveBooleanArg(args, "header-rotation", undefined, false);
+  const headerRotationStrategy = resolveHeaderRotationStrategy(args.get("header-rotation-strategy"), headerRotationEnabled);
+  const headerProfileId = resolveOptionalStringArg(args.get("header-profile-id"));
 
   return {
     baseUrl,
@@ -105,6 +109,9 @@ export async function buildConfigFromArgs(
     duplicate429WindowMs: resolveNumberArg(args, "duplicate-429-window-ms", undefined, 30_000),
     duplicate429Threshold: resolveNumberArg(args, "duplicate-429-threshold", undefined, 3),
     debugCaptureDir,
+    headerRotationEnabled,
+    headerRotationStrategy,
+    headerProfileId,
   };
 }
 
@@ -180,6 +187,28 @@ export function resolveResultFormat(
     throw new Error(`Unsupported result format '${normalized}'. Use --result-format csv|json.`);
   }
   return normalized;
+}
+
+function resolveHeaderRotationStrategy(
+  value: string | boolean | undefined,
+  enabled: boolean,
+): "off" | "per-run" | "per-request" {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (isHeaderRotationStrategy(normalized)) {
+      return normalized;
+    }
+    throw new Error(`Unsupported header rotation strategy '${normalized}'. Use --header-rotation-strategy off|per-run|per-request.`);
+  }
+  return enabled ? "per-run" : "off";
+}
+
+function resolveOptionalStringArg(value: string | boolean | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 export function parseLooseBotJobs(input: string): unknown {

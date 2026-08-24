@@ -6,6 +6,7 @@ import { CookieJar } from "tough-cookie";
 import { join } from "path";
 import { writeFile } from "fs/promises";
 import { Logger } from "../logging/logger";
+import { HeaderRequestKind, HeaderSelector } from "../network/headerSelector";
 import { PartialUpdateMap, PortalState } from "../types";
 import { ensureDir } from "../utils/fs";
 import { buildInicioSearchPayload } from "../pages/inicioPage";
@@ -20,6 +21,7 @@ export interface PortalClientOptions {
   resultPath?: string;
   debugCaptureDir?: string;
   requestTimeoutMs?: number;
+  headerSelector?: HeaderSelector;
 }
 
 export interface PortalResponse {
@@ -38,8 +40,7 @@ export class PortalClient {
   private readonly debugCaptureDir?: string;
   private state?: PortalState;
   private readonly session = new PortalSessionState();
-  private readonly browserUserAgent =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
+  private readonly headerSelector: HeaderSelector;
   private debugCaptureSeq = 0;
   private bulkSubmitCandidates: string[] = [];
 
@@ -49,6 +50,11 @@ export class PortalClient {
     this.resultPath = options.resultPath ?? "/faces/page/resultado.xhtml";
     this.logger = logger;
     this.debugCaptureDir = options.debugCaptureDir;
+    this.headerSelector = options.headerSelector ?? new HeaderSelector({
+      enabled: false,
+      strategy: "off",
+      sessionKey: "default",
+    });
     if (axiosInstance) {
       this.axios = axiosInstance;
     } else {
@@ -59,10 +65,7 @@ export class PortalClient {
           withCredentials: true,
           jar,
           timeout: options.requestTimeoutMs ?? 30_000,
-          headers: {
-            "User-Agent": this.browserUserAgent,
-            "Accept-Language": "es-US,es-419;q=0.9,es;q=0.8",
-          },
+          headers: this.resolveHeaders("portal-document"),
         }),
       );
     }
@@ -118,7 +121,7 @@ export class PortalClient {
       payload.toString(),
       {
         headers: {
-          Accept: "application/xml, text/xml, */*; q=0.01",
+          ...this.resolveHeaders("portal-ajax"),
           "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
           "Faces-Request": "partial/ajax",
           "X-Requested-With": "XMLHttpRequest",
@@ -135,7 +138,7 @@ export class PortalClient {
       });
       const refreshed = await this.axios.get<string>(this.buildUrl(this.resultPath), {
         headers: {
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          ...this.resolveHeaders("portal-document"),
           Origin: this.getPortalOrigin(),
           Referer: this.buildUrl(this.resultPath),
           "Upgrade-Insecure-Requests": "1",
@@ -179,7 +182,7 @@ export class PortalClient {
 
     await this.axios.post(this.buildUrl(this.initPath), payload.toString(), {
       headers: {
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ...this.resolveHeaders("portal-document"),
         "Content-Type": "application/x-www-form-urlencoded",
         Origin: this.getPortalOrigin(),
         Referer: this.buildUrl(this.initPath),
@@ -221,7 +224,7 @@ export class PortalClient {
     });
     const response = await this.axios.post<string>(this.buildUrl(this.resultPath), payload.toString(), {
       headers: {
-        Accept: "application/xml, text/xml, */*; q=0.01",
+        ...this.resolveHeaders("portal-ajax"),
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Faces-Request": "partial/ajax",
         "X-Requested-With": "XMLHttpRequest",
@@ -238,7 +241,7 @@ export class PortalClient {
       });
       const refreshed = await this.axios.get<string>(this.buildUrl(this.resultPath), {
         headers: {
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          ...this.resolveHeaders("portal-document"),
           Origin: this.getPortalOrigin(),
           Referer: this.buildUrl(this.resultPath),
           "Upgrade-Insecure-Requests": "1",
@@ -334,7 +337,7 @@ export class PortalClient {
     const response = await this.axios.post<ArrayBuffer>(this.buildUrl(this.resultPath), payload.toString(), {
       responseType: "arraybuffer",
       headers: {
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ...this.resolveHeaders("portal-download"),
         "Cache-Control": "max-age=0",
         "Content-Type": "application/x-www-form-urlencoded",
         Origin: this.getPortalOrigin(),
@@ -461,7 +464,7 @@ export class PortalClient {
     try {
       const ajaxResponse = await this.axios.post<string>(this.buildUrl(this.resultPath), ajaxPayload.toString(), {
         headers: {
-          Accept: "*/*",
+          ...this.resolveHeaders("portal-ajax"),
           "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
           "Faces-Request": "partial/ajax",
           "X-Requested-With": "XMLHttpRequest",
@@ -543,7 +546,7 @@ export class PortalClient {
     try {
       const response = await this.axios.post<string>(this.buildUrl(this.resultPath), payload.toString(), {
         headers: {
-          Accept: "*/*",
+          ...this.resolveHeaders("portal-ajax"),
           "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
           "Faces-Request": "partial/ajax",
           "X-Requested-With": "XMLHttpRequest",
@@ -584,6 +587,10 @@ export class PortalClient {
       });
       return false;
     }
+  }
+
+  private resolveHeaders(kind: HeaderRequestKind): Record<string, string> {
+    return this.headerSelector.select(kind);
   }
 
   private buildUrl(path: string): string {
