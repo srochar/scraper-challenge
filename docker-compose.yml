@@ -1,24 +1,8 @@
 services:
-  bot-civil:
+  bot-runner:
     build: .
-    container_name: scraper-bot-civil
-    command: ["npm", "run", "scrape", "--", "--bot", "civil", "--search", "civil", "--max-pages", "2", "--download-mode", "individual", "--request-delay-ms", "1200", "--request-jitter-ms", "900", "--log-format", "pretty"]
-    volumes:
-      - ./runs:/app/runs
-    restart: "no"
-
-  bot-familia:
-    build: .
-    container_name: scraper-bot-familia
-    command: ["npm", "run", "scrape", "--", "--bot", "familia", "--search", "familia", "--max-pages", "2", "--download-mode", "individual", "--request-delay-ms", "1200", "--request-jitter-ms", "900", "--log-format", "pretty"]
-    volumes:
-      - ./runs:/app/runs
-    restart: "no"
-
-  bot-robo:
-    build: .
-    container_name: scraper-bot-robo
-    command: ["npm", "run", "scrape", "--", "--bot", "robo", "--search", "robo", "--max-pages", "2", "--download-mode", "individual", "--request-delay-ms", "1200", "--request-jitter-ms", "900", "--log-format", "pretty"]
+    container_name: scraper-bot-runner
+    command: ["npm", "run", "scrape", "--", "--bot", "civil", "--search", "civil"]
     volumes:
       - ./runs:/app/runs
     restart: "no"

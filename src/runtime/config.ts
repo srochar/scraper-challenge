@@ -1,12 +1,10 @@
 import { randomBytes } from "crypto";
-import { readFile } from "fs/promises";
-import { isAbsolute, join, resolve } from "path";
-import { BotJob } from "../botQueue";
+import { join } from "path";
 import { normalizeLogFormat, normalizeLogLevel } from "../logging/logger";
 import { ScraperConfig } from "../types";
 import { stableHash } from "../utils/hash";
 import { ensureDir, readJson, writeJson } from "../utils/fs";
-import { LatestPointer, RuntimeConfigFile, RuntimeDefaults } from "./types";
+import { LatestPointer } from "./types";
 
 export const DEFAULT_BOT_CONCURRENCY = 2;
 export const MAX_BOT_CONCURRENCY = 4;
@@ -32,14 +30,15 @@ export function parseArgs(argv: string[]): Map<string, string | boolean> {
 
 export async function buildConfig(argv: string[]): Promise<ScraperConfig> {
   const args = parseArgs(argv);
-  const runtimeConfig = await loadRuntimeConfig(args.get("config") as string | undefined);
-  return buildConfigFromArgs(args, undefined, runtimeConfig.defaults);
+  if (args.has("config")) {
+    throw new Error("--config is no longer supported. Use direct CLI flags instead.");
+  }
+  return buildConfigFromArgs(args);
 }
 
 export async function buildConfigFromArgs(
   args: Map<string, string | boolean>,
   overrides?: Partial<{ bot: string; searchTerm: string; maxPages: number; maxRecords: number; runId: string }>,
-  defaults?: RuntimeDefaults,
 ): Promise<ScraperConfig> {
   const bot = sanitizeBotName(overrides?.bot ?? (args.get("bot") as string | undefined) ?? "default");
   const runsDir = (args.get("runs-dir") as string | undefined) ?? join(process.cwd(), "runs");
@@ -68,7 +67,7 @@ export async function buildConfigFromArgs(
   await ensureDir(join(runsDir, bot));
   await writeJson(latestPath, { runId, updatedAt: new Date().toISOString() } as LatestPointer);
 
-  const resultFormat = resolveResultFormat(args.get("result-format"), defaults?.resultFormat);
+  const resultFormat = resolveResultFormat(args.get("result-format"), undefined);
 
   return {
     baseUrl,
@@ -84,25 +83,27 @@ export async function buildConfigFromArgs(
     failedOnly: Boolean(args.get("failed-only")),
     maxRecords: overrides?.maxRecords ?? (args.get("max-records") ? Number(args.get("max-records")) : undefined),
     maxPages: overrides?.maxPages ?? (args.get("max-pages") ? Number(args.get("max-pages")) : undefined),
-    requestTimeoutMs: resolveNumberArg(args, "request-timeout-ms", defaults?.requestTimeoutMs, 30_000),
-    requestDelayMs: resolveNumberArg(args, "request-delay-ms", defaults?.requestDelayMs, 0),
-    requestJitterMs: resolveNumberArg(args, "request-jitter-ms", defaults?.requestJitterMs, 0),
-    logLevel: normalizeLogLevel((args.get("log-level") as string | undefined) ?? defaults?.logLevel),
-    logFormat: normalizeLogFormat((args.get("log-format") as string | undefined) ?? defaults?.logFormat),
+    requestTimeoutMs: resolveNumberArg(args, "request-timeout-ms", undefined, 30_000),
+    requestDelayMs: resolveNumberArg(args, "request-delay-ms", undefined, 0),
+    requestJitterMs: resolveNumberArg(args, "request-jitter-ms", undefined, 0),
+    logLevel: normalizeLogLevel(args.get("log-level") as string | undefined),
+    logFormat: normalizeLogFormat(args.get("log-format") as string | undefined),
     logFilePath,
-    downloadMode: (((args.get("download-mode") as string | undefined) ?? defaults?.downloadMode ?? "individual")) as
+    downloadMode: (((args.get("download-mode") as string | undefined) ?? "individual")) as
       | "individual"
       | "bulk"
       | "both",
     resultFormat,
-    unzip: resolveBooleanArg(args, "unzip", defaults?.unzip, false),
+    unzip: resolveBooleanArg(args, "unzip", undefined, false),
     sessionKey,
     maxConsecutiveDownloadFailures: resolveNumberArg(
       args,
       "max-consecutive-download-failures",
-      defaults?.maxConsecutiveDownloadFailures,
+      undefined,
       0,
     ),
+    duplicate429WindowMs: resolveNumberArg(args, "duplicate-429-window-ms", undefined, 30_000),
+    duplicate429Threshold: resolveNumberArg(args, "duplicate-429-threshold", undefined, 3),
     debugCaptureDir,
   };
 }
@@ -132,9 +133,8 @@ export function normalizeBotConcurrency(raw: number): number {
 
 export function resolveBotConcurrency(
   args: Map<string, string | boolean>,
-  defaults?: RuntimeDefaults,
 ): { requested: number; effective: number } {
-  const requested = resolveNumberArg(args, "bot-concurrency", defaults?.botConcurrency, DEFAULT_BOT_CONCURRENCY);
+  const requested = resolveNumberArg(args, "bot-concurrency", undefined, DEFAULT_BOT_CONCURRENCY);
   return {
     requested,
     effective: normalizeBotConcurrency(requested),
@@ -180,146 +180,6 @@ export function resolveResultFormat(
     throw new Error(`Unsupported result format '${normalized}'. Use --result-format csv|json.`);
   }
   return normalized;
-}
-
-export async function loadRuntimeConfig(configPath: string | undefined): Promise<RuntimeConfigFile> {
-  const resolvedPath = resolveConfigPath(configPath);
-  if (!resolvedPath) {
-    return {};
-  }
-
-  let parsed: unknown;
-  try {
-    const content = await readFile(resolvedPath, "utf8");
-    parsed = JSON.parse(content) as unknown;
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid config file '${resolvedPath}': ${reason}`);
-  }
-
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error(`Invalid config file '${resolvedPath}': expected a JSON object`);
-  }
-
-  const config = parsed as RuntimeConfigFile;
-  const defaults = config.defaults;
-  if (defaults && typeof defaults !== "object") {
-    throw new Error(`Invalid config file '${resolvedPath}': defaults must be an object`);
-  }
-  if (defaults?.resultFormat !== undefined && typeof defaults.resultFormat !== "string") {
-    throw new Error(`Invalid config file '${resolvedPath}': defaults.resultFormat must be a string`);
-  }
-  if (defaults?.botConcurrency !== undefined && typeof defaults.botConcurrency !== "number") {
-    throw new Error(`Invalid config file '${resolvedPath}': defaults.botConcurrency must be a number`);
-  }
-  if (defaults?.requestTimeoutMs !== undefined && typeof defaults.requestTimeoutMs !== "number") {
-    throw new Error(`Invalid config file '${resolvedPath}': defaults.requestTimeoutMs must be a number`);
-  }
-  if (config.botJobs && !Array.isArray(config.botJobs)) {
-    throw new Error(`Invalid config file '${resolvedPath}': botJobs must be an array`);
-  }
-  if (config.botGroups && !Array.isArray(config.botGroups)) {
-    throw new Error(`Invalid config file '${resolvedPath}': botGroups must be an array`);
-  }
-  if (config.botJobs) {
-    config.botJobs.forEach((job, index) => {
-      if (typeof job !== "object" || !job) {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}] must be an object`);
-      }
-      if (typeof job.bot !== "string" || typeof job.searchTerm !== "string") {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}] requires string bot and searchTerm`);
-      }
-      if (job.id !== undefined && typeof job.id !== "string") {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}].id must be a string`);
-      }
-      if (job.maxPages !== undefined && typeof job.maxPages !== "number") {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}].maxPages must be a number`);
-      }
-      if (job.maxRecords !== undefined && typeof job.maxRecords !== "number") {
-        throw new Error(`Invalid config file '${resolvedPath}': botJobs[${index}].maxRecords must be a number`);
-      }
-    });
-  }
-  if (config.botGroups) {
-    config.botGroups.forEach((group, index) => {
-      if (typeof group !== "object" || !group) {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}] must be an object`);
-      }
-      if (typeof group.bot !== "string") {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].bot must be a string`);
-      }
-      if (!Array.isArray(group.searchTerms) || group.searchTerms.length === 0) {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms must be a non-empty array`);
-      }
-      if (group.maxPages !== undefined && typeof group.maxPages !== "number") {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].maxPages must be a number`);
-      }
-      if (group.maxRecords !== undefined && typeof group.maxRecords !== "number") {
-        throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].maxRecords must be a number`);
-      }
-      group.searchTerms.forEach((entry, entryIndex) => {
-        if (typeof entry === "string") {
-          if (!entry.trim()) {
-            throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}] cannot be empty`);
-          }
-          return;
-        }
-        if (!entry || typeof entry !== "object") {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}] must be a string or object`);
-        }
-        if (typeof entry.term !== "string" || !entry.term.trim()) {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}].term must be a non-empty string`);
-        }
-        if (entry.id !== undefined && typeof entry.id !== "string") {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}].id must be a string`);
-        }
-        if (entry.maxPages !== undefined && typeof entry.maxPages !== "number") {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}].maxPages must be a number`);
-        }
-        if (entry.maxRecords !== undefined && typeof entry.maxRecords !== "number") {
-          throw new Error(`Invalid config file '${resolvedPath}': botGroups[${index}].searchTerms[${entryIndex}].maxRecords must be a number`);
-        }
-      });
-    });
-  }
-
-  return config;
-}
-
-export function expandConfigBotJobs(config: RuntimeConfigFile): BotJob[] {
-  const explicit = config.botJobs ?? [];
-  const fromGroups = (config.botGroups ?? []).flatMap((group) => {
-    const bot = group.bot;
-    return group.searchTerms.map((entry, index) => {
-      if (typeof entry === "string") {
-        return {
-          id: `${bot}-${index + 1}`,
-          bot,
-          searchTerm: entry,
-          maxPages: group.maxPages,
-          maxRecords: group.maxRecords,
-        } satisfies BotJob;
-      }
-
-      return {
-        id: entry.id ?? `${bot}-${index + 1}`,
-        bot,
-        searchTerm: entry.term,
-        maxPages: entry.maxPages ?? group.maxPages,
-        maxRecords: entry.maxRecords ?? group.maxRecords,
-      } satisfies BotJob;
-    });
-  });
-
-  return [...explicit, ...fromGroups];
-}
-
-function resolveConfigPath(configPath: string | undefined): string | undefined {
-  const input = configPath?.trim();
-  if (!input) {
-    return undefined;
-  }
-  return isAbsolute(input) ? input : resolve(process.cwd(), input);
 }
 
 export function parseLooseBotJobs(input: string): unknown {

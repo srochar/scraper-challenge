@@ -6,7 +6,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "scrape": "ts-node src/index.ts",
-    "scrape:fresh": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"if (Test-Path -LiteralPath 'runs') { Remove-Item -LiteralPath 'runs' -Recurse -Force }; if (Test-Path -LiteralPath 'output') { Remove-Item -LiteralPath 'output' -Recurse -Force }; New-Item -ItemType Directory -Path 'runs' | Out-Null; New-Item -ItemType Directory -Path 'output' | Out-Null; npm run scrape -- --config scraper.config.json\"",
+    "scrape:fresh": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"if (Test-Path -LiteralPath 'runs') { Remove-Item -LiteralPath 'runs' -Recurse -Force }; if (Test-Path -LiteralPath 'output') { Remove-Item -LiteralPath 'output' -Recurse -Force }; New-Item -ItemType Directory -Path 'runs' | Out-Null; New-Item -ItemType Directory -Path 'output' | Out-Null; npm run scrape -- --bot civil --search civil\"",
+    "reliability:campaign": "node scripts/reliability-campaign.js",
+    "reliability:report": "node scripts/reliability-campaign.js --report-only",
+    "reliability:self-check": "node scripts/reliability-campaign.js --self-check",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -16,6 +19,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "adm-zip": "^0.6.0",
     "axios": "^1.19.0",
     "axios-cookiejar-support": "^7.0.0",
     "cheerio": "^1.2.0",

@@ -35,7 +35,6 @@ npm run scrape -- --bot civil --search civil --max-records 10
 
 Parametros utiles:
 
-- `--config <path>`: archivo JSON con defaults, `botJobs` y/o `botGroups` para no repetir flags largos
 - `--bot <nombre>`: identificador del bot (default `default`)
 - `--runs-dir <path>`: carpeta base de corridas (default `runs`)
 - `--run-id <id>`: reutiliza una corrida especifica
@@ -65,91 +64,10 @@ Parametros utiles:
 - `--network-max-cooldown-ms <ms>`: maximo cooldown global (default `60000`)
 - `--network-jitter-ratio <0..1>`: jitter del rate limit global (default `0.2`)
 - `--max-consecutive-download-failures <n>`: aborta la corrida si hay `n` fallas de descarga seguidas (`0` desactiva, default `0`)
+- `--duplicate-429-window-ms <ms>`: ventana para detectar cluster de `429` por URL PDF canónica (default `30000`)
+- `--duplicate-429-threshold <n>`: cantidad de `429` en la ventana para activar guardrail por URL canónica (default `3`)
 
 Nota de pacing: si una descarga individual falla, el bot vuelve a aplicar el mismo pacing (`requestDelayMs` + jitter) y luego espera ~5 segundos adicionales antes de pasar al siguiente registro.
-
-## Configuracion por archivo (`--config`)
-
-Estructura general soportada:
-
-```json
-{
-  "environment": "dev",
-  "defaults": {
-    "botConcurrency": 1,
-    "networkRps": 0.5,
-    "networkCooldownMs": 10000,
-    "networkCooldownThreshold": 3,
-    "networkCooldownWindowMs": 30000,
-    "networkMaxCooldownMs": 60000,
-    "networkJitterRatio": 0.2,
-    "requestTimeoutMs": 15000,
-    "requestDelayMs": 1200,
-    "requestJitterMs": 900,
-    "maxConsecutiveDownloadFailures": 3,
-    "downloadMode": "individual",
-    "resultFormat": "csv",
-    "unzip": false,
-    "logLevel": "debug",
-    "logFormat": "pretty"
-  },
-  "botJobs": [
-    {
-      "id": "civil-herencia",
-      "bot": "civil",
-      "searchTerm": "herencia",
-      "maxPages": 2,
-      "maxRecords": 20
-    }
-  ],
-  "botGroups": [
-    {
-      "bot": "familia",
-      "maxPages": 2,
-      "maxRecords": 20,
-      "searchTerms": [
-        "familia",
-        {
-          "id": "familia-alimentos",
-          "term": "alimentos",
-          "maxPages": 3,
-          "maxRecords": 30
-        }
-      ]
-    }
-  ]
-}
-```
-
-Campos y descripcion:
-
-- `environment`: etiqueta libre de entorno (`dev`, `prod`, etc.) para identificar perfiles.
-- `defaults`: valores por defecto que se aplican si no se pasan flags por CLI.
-- `defaults.botConcurrency`: concurrencia de jobs en cola multi-bot (se acota entre 1 y 4).
-- `defaults.networkRps`: requests/segundo globales del dispatcher.
-- `defaults.networkCooldownMs`: cooldown base tras 429.
-- `defaults.networkCooldownThreshold`: cantidad de 429 para escalar cooldown.
-- `defaults.networkCooldownWindowMs`: ventana de tiempo para contar 429.
-- `defaults.networkMaxCooldownMs`: tope maximo del cooldown adaptativo.
-- `defaults.networkJitterRatio`: jitter del rate limit global (`0..1`).
-- `defaults.requestTimeoutMs`: timeout HTTP por request al portal.
-- `defaults.requestDelayMs`: pausa fija entre operaciones de descarga.
-- `defaults.requestJitterMs`: jitter aleatorio adicional para la pausa.
-- `defaults.maxConsecutiveDownloadFailures`: umbral para abortar por fallas seguidas (`0` desactiva).
-- `defaults.downloadMode`: `individual`, `bulk` o `both`.
-- `defaults.resultFormat`: `csv` o `json`.
-- `defaults.unzip`: descomprimir ZIPs bulk automaticamente.
-- `defaults.logLevel`: `debug`, `info`, `warn`, `error`.
-- `defaults.logFormat`: `json` o `pretty`.
-- `botJobs`: lista explicita de jobs (cada item requiere `bot` y `searchTerm`; `id`, `maxPages`, `maxRecords` opcionales).
-- `botGroups`: forma compacta de declarar grupos por bot.
-- `botGroups[].searchTerms`: acepta strings o objetos `{ id?, term, maxPages?, maxRecords? }`.
-
-Prioridad de configuracion:
-
-- CLI (`--network-rps`, etc.)
-- `defaults` en `--config`
-- default interno del programa
 
 ## Artefactos de salida
 
@@ -215,6 +133,11 @@ Ejemplo:
 npm run scrape -- --bot civil --search "civil" --max-records 5 --max-pages 2 --log-level debug --log-format pretty
 ```
 
+Diagnostico 429/duplicados:
+
+- `downloadReason = duplicate_pdf_url_suppressed`: el registro comparte URL PDF canónica con uno ya procesado en la misma corrida y se suprimen reintentos redundantes.
+- Campos de contexto clave en logs/errores: `canonicalPdfUrl`, `rateLimitHitsInWindow`, `cooldownMs`, `cooldownMultiplier`, `guardrailActivated`, `duplicateSuppressed`.
+
 ## Docker
 
 Build de imagen:
@@ -232,74 +155,14 @@ docker compose logs -f bot-runner
 
 ## Cola de bots y cola de red
 
-Recomendado: usar archivo de configuracion para no pasar `--bot-jobs` y otros flags largos en cada ejecucion.
-
-Archivo ejemplo: `scraper.config.json`
-
-```json
-{
-  "defaults": {
-    "botConcurrency": 3,
-    "networkRps": 1,
-    "networkCooldownMs": 10000,
-    "networkCooldownThreshold": 3,
-    "networkCooldownWindowMs": 30000,
-    "networkJitterRatio": 0.2,
-    "requestDelayMs": 1200,
-    "requestJitterMs": 900,
-    "downloadMode": "bulk",
-    "unzip": true,
-    "resultFormat": "csv",
-    "logFormat": "pretty",
-    "logLevel": "info"
-  },
-  "botGroups": [
-    {
-      "bot": "civil",
-      "maxPages": 2,
-      "searchTerms": ["herencia", "derecho a vivienda"]
-    },
-    {
-      "bot": "familia",
-      "maxPages": 2,
-      "searchTerms": ["tenencia", "alimentos"]
-    },
-    {
-      "bot": "impuestos",
-      "maxPages": 2,
-      "searchTerms": [
-        { "id": "impuestos-absueltos", "term": "empresarios absuelto evadir impuesto" }
-      ]
-    }
-  ]
-}
-```
-
-Configuracion DEV recomendada para este repo:
-
-- Define `"environment": "dev"` en `scraper.config.json` para identificar perfil local.
-- Mantiene `"downloadMode": "bulk"` para priorizar descarga grupal ZIP por pagina.
-- Activa `"unzip": true` para descomprimir automaticamente cada ZIP bulk en una carpeta hermana dentro de `artifacts/bulk/`.
-
-Ejecucion con config:
-
-```bash
-npm run scrape -- --config scraper.config.json
-```
-
-Prioridad de configuracion:
-- CLI (`--network-rps`, etc.)
-- `defaults` en `--config`
-- default interno del programa
-
-`botGroups` se expande automaticamente a jobs. Si defines ambos, se ejecutan `botJobs` + `botGroups`.
+Puedes ejecutar multiples jobs con `--bot-jobs` (JSON por CLI) y controlar concurrencia con `--bot-concurrency`.
 
 `botConcurrency` controla cuantos jobs quedan activos al mismo tiempo. Guardrails:
 - Default operativo: `2`
 - Minimo efectivo: `1`
-- Maximo permitido: `4` (si envias un valor mayor por CLI/config, el proceso lo acota y emite warning)
+- Maximo permitido: `4` (si envias un valor mayor por CLI, el proceso lo acota y emite warning)
 
-`--bot-jobs` por CLI (si se pasa) reemplaza todo lo del archivo para esa ejecucion.
+`--bot-jobs` por CLI define explicitamente el lote de ejecucion para esa corrida.
 
 Ejemplo local (3 bots con concurrencia 2 y rate limit global compartido):
 
@@ -316,3 +179,6 @@ npm run scrape -- --bot-jobs "[{\"id\":\"civil\",\"bot\":\"civil\",\"searchTerm\
 - En ejecucion multi-job, un job se reporta con `success: false` cuando termina con descargas fallidas (`summary.failed > 0`), aunque la corrida haya finalizado sin excepcion fatal.
 - En `downloadMode=bulk`, el scraper ejecuta seleccion masiva por pagina y envia el submit final alineado al flujo real del portal (HAR), evitando campos extra que invaliden la seleccion.
 - Con `unzip=true`, por cada `*.zip` guardado en `runs/<bot>/<runId>/artifacts/bulk/` se crea una carpeta de extraccion con el mismo nombre base.
+- Diagnostico 429/duplicados:
+  - reason `duplicate_pdf_url_suppressed`: el registro se resolvio como duplicado de una URL PDF canónica ya vista en la misma corrida y se suprimieron reintentos redundantes.
+  - Campos de contexto relevantes en logs/errores: `canonicalPdfUrl`, `rateLimitHitsInWindow`, `cooldownMs`, `cooldownMultiplier`, `guardrailActivated`, `duplicateSuppressed`.

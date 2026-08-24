@@ -10,9 +10,7 @@ import { createDispatcher } from "./runtime/dispatcher";
 import {
   buildConfig,
   buildConfigFromArgs,
-  expandConfigBotJobs,
   generateRunId,
-  loadRuntimeConfig,
   MAX_BOT_CONCURRENCY,
   parseArgs,
   resolveBotConcurrency,
@@ -24,21 +22,20 @@ import { toSpanishErrorMessage } from "./utils/errorMessages";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
-  const runtimeConfig = await loadRuntimeConfig(args.get("config") as string | undefined);
+  if (args.has("config")) {
+    throw new Error("--config is no longer supported. Use direct CLI flags instead.");
+  }
   const runsRoot = (args.get("runs-dir") as string | undefined) ?? join(process.cwd(), "runs");
   const processLogger = createLogger({
-    level: normalizeLogLevel((args.get("log-level") as string | undefined) ?? runtimeConfig.defaults?.logLevel),
-    format: normalizeLogFormat((args.get("log-format") as string | undefined) ?? runtimeConfig.defaults?.logFormat),
+    level: normalizeLogLevel(args.get("log-level") as string | undefined),
+    format: normalizeLogFormat(args.get("log-format") as string | undefined),
     service: "scraping-bot",
     logFilePath: join(runsRoot, "global.logs.jsonl"),
     context: { module: "main" },
   });
-  const dispatcher = createDispatcher(args, runtimeConfig.defaults);
-  const { requested: requestedBotConcurrency, effective: botConcurrency } = resolveBotConcurrency(args, runtimeConfig.defaults);
-  const jobs = parseBotJobs(
-    args.get("bot-jobs") as string | undefined,
-    expandConfigBotJobs(runtimeConfig),
-  );
+  const dispatcher = createDispatcher(args);
+  const { requested: requestedBotConcurrency, effective: botConcurrency } = resolveBotConcurrency(args);
+  const jobs = parseBotJobs(args.get("bot-jobs") as string | undefined);
   const processStartedAtMs = Date.now();
   const processStartedAt = new Date(processStartedAtMs).toISOString();
   processLogger.info("Inicio de proceso total", {
@@ -62,7 +59,7 @@ async function main(): Promise<void> {
 
   try {
     if (jobs.length === 0) {
-      const config = await buildConfigFromArgs(args, undefined, runtimeConfig.defaults);
+      const config = await buildConfigFromArgs(args);
       const spiderStartedAtMs = Date.now();
       const spiderStartedAt = new Date(spiderStartedAtMs).toISOString();
       processLogger.info("Inicio de arana", {
@@ -119,7 +116,6 @@ async function main(): Promise<void> {
             maxRecords: job.maxRecords,
             runId: generateRunId(),
           },
-          runtimeConfig.defaults,
         );
         sessionKey = config.sessionKey;
         processLogger.info("Inicio de arana", {
@@ -307,8 +303,6 @@ async function runSingleConfig(
 export {
   parseArgs,
   buildConfig,
-  loadRuntimeConfig,
-  expandConfigBotJobs,
   isSummarySuccessful,
   writeGlobalConsolidatedResults,
   toFatalErrorPayload,
